@@ -278,7 +278,7 @@ bauify/
   README.md  LICENSE  NOTICE
   .github/workflows/ci.yml      ← Node 18/20/22/24; self-analysis tests use a pinned Archify checkout
   package.json                  ← devDependencies: typescript, ajv
-  bin/analyze.mjs               ← run | extract | graphs | evaluate | bridge | overlay
+  bin/analyze.mjs               ← run | extract | graphs | evaluate | bridge | overlay | analyze
   config/
     defaults.json               ← every threshold
     external-apis.json          ← API catalog for the error-handling rules
@@ -312,6 +312,7 @@ bauify/
 bauify run      <repo-root> --out out/ [--language ts|py] [--config f] [--since <ref>] [--json]
 bauify extract | graphs | evaluate | bridge ...            # single steps
 bauify overlay  <delivered.html> <ir.json> <module-graph.json> --out <analysis.html> [--map m.json] [--source <dir>]
+bauify analyze  <repo-root> --ir <architecture.json> --out <dir> [--map m.json] [--archify <dir>]   # run + archify deliver + overlay
 bauify run      <repo-root> --fail-on error                # CI gate (planned)
 bauify explain  out/findings.json                          # optional, needs an LLM configuration (planned)
 

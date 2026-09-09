@@ -131,3 +131,31 @@ test('overlay: --source embeds the full text of every file a finding cites, noth
   assert.deepEqual(Object.keys(p.snippets), ['src/index.mjs'], 'only cited files are embedded');
   assert.deepEqual(payloadOf(buildOverlay({ ir, graph, html: FAKE_HTML, map: null, findings: [finding] }).html).snippets, {}, 'without --source nothing is embedded');
 });
+
+test('analyze: one command runs the pipeline, delivers the authored IR through Archify, and overlays', { skip: ARCHIFY_AVAILABLE ? false : 'needs an Archify checkout' }, () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'bauify-analyze-'));
+  // A tiny hand-authored diagram for the py-basic fixture. No sources (Archify then insists on a pinned
+  // meta.repository); the component-to-module mapping comes from --map instead.
+  const ir = path.join(out, 'fixture.architecture.json');
+  const map = path.join(out, 'map.json');
+  fs.writeFileSync(map, JSON.stringify({ app: ['app'], util: ['app-util'] }));
+  fs.writeFileSync(ir, JSON.stringify({
+    schema_version: 1, diagram_type: 'architecture', meta: { title: 'py-basic', quality_profile: 'standard' },
+    components: [
+      { id: 'app', type: 'backend', label: 'App', pos: [40, 40], size: [170, 64] },
+      { id: 'util', type: 'backend', label: 'Util', pos: [300, 40], size: [170, 64] },
+    ],
+    connections: [{ from: 'app', to: 'util', label: 'uses' }],
+  }));
+  const result = runCli(['analyze', path.join(BAUIFY_ROOT, 'test', 'fixtures', 'py-basic'), '--ir', ir, '--map', map, '--out', out, '--json']);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.json.command, 'analyze');
+  for (const f of ['raw-facts.json', 'module-graph.json', 'findings.json', 'repo.html', 'repo.analysis.html']) assert.ok(fs.existsSync(path.join(out, f)), f);
+  assert.equal(result.json.deliver.validation.compositionStatus, 'pass');
+  assert.equal(result.json.overlay.components, 2);
+  assert.equal(result.json.overlay.mapped, 2);
+  assert.ok(fs.readFileSync(path.join(out, 'repo.analysis.html'), 'utf8').includes('id="bauify-analysis"'));
+  const missing = runCli(['analyze', path.join(BAUIFY_ROOT, 'test', 'fixtures', 'py-basic'), '--ir', ir, '--out', out, '--archify', path.join(out, 'nowhere'), '--json']);
+  assert.equal(missing.status, 1);
+  assert.equal(missing.json.diagnostics[0].code, 'cli/archify-missing');
+});

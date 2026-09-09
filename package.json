@@ -13,8 +13,8 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "e2e:archify": "node bin/analyze.mjs run ../archify/archify --out out/archify --json && node ../archify/archify/bin/archify.mjs deliver architecture out/archify/repo.architecture.json out/archify/repo.html --quality standard --repo-root ../archify --json",
-    "e2e:ai-voice": "node bin/analyze.mjs run \"$BAUIFY_AI_VOICE_ROOT\" --language py --out out/ai-voice --json && node ../archify/archify/bin/archify.mjs deliver architecture out/ai-voice/repo.architecture.json out/ai-voice/repo.html --quality standard --repo-root \"$BAUIFY_AI_VOICE_ROOT\" --json"
+    "e2e:archify": "node bin/analyze.mjs analyze ../archify/archify --ir ../archify/examples/archify-repo.architecture.json --map examples/archify.overlay-map.json --out out/archify --json",
+    "e2e:ai-voice": "node bin/analyze.mjs analyze ../ai-voice-assistant --language py --ir examples/ai-voice.manual.architecture.json --map examples/ai-voice.overlay-map.json --out out/ai-voice --json"
   },
   "devDependencies": {
     "ajv": "^8.17.1",
