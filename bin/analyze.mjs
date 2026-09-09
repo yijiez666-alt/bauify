@@ -12,9 +12,16 @@ import { evaluate } from '../evaluate/index.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const USAGE = `Usage:
-  bauify extract <repo-root> [--out file.json] [--config file.json] [--language ts] [--json]
+  bauify run      <repo-root> --out <dir> [--language ts|py] [--config file.json] [--json]
+  bauify extract  <repo-root> [--out raw-facts.json] [--language ts|py] [--config file.json] [--json]
+  bauify graphs   raw-facts.json [--out module-graph.json] [--config file.json] [--json]
+  bauify evaluate module-graph.json [--facts raw-facts.json] [--out findings.json] [--config file.json] [--json]
+  bauify bridge   module-graph.json [--out repo.architecture.json] [--config file.json] [--json]
+  bauify overlay  <archify.html> <ir.json> <module-graph.json> --out <analysis.html>
+                  [--map overlay-map.json] [--source <analyzed dir>] [--facts raw-facts.json] [--findings findings.json] [--json]
 
-M1 implements only "extract". Later steps: graphs, evaluate, report, bridge.`;
+run = extract -> graphs -> evaluate -> bridge into one directory.
+overlay never modifies the delivered HTML; it writes a new file next to it.`;
 
 function loadConfig(explicit) {
   const defaults = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'config', 'defaults.json'), 'utf8'));
