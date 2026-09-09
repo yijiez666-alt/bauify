@@ -78,8 +78,10 @@ interface LanguageAdapter {
 
 | 语言 | 前端 | 产出 | 说明 |
 |---|---|---|---|
-| JS / TS（第一阶段） | TypeScript Compiler API（`createProgram` + `allowJs`） | import 边、符号定义、引用、调用、函数 AST 度量 | 一次遍历拿全；TS 的引用解析对 JS 也够用，Archify 自身可自举 |
-| Python（第二阶段） | 标准库 `ast` + 自写 import 解析；调用图用 `pycg`（可选） | 同上，调用解析精度较低 | 通过子进程输出 JSON |
+| JS / TS | TypeScript Compiler API（`createProgram` + `allowJs`） | import 边（static / dynamic / require / export）、符号定义、引用、调用、函数 AST 度量 | 一次遍历拿全；TS 的引用解析对 JS 也够用，Archify 自身可自举 |
+| Python | 标准库 `ast`（`extract/py/extract.py`，子进程输出 JSON）+ Node 侧解析 | import 边；相对导入、`__init__.py` 包、PEP 420 命名空间包、`importlib.import_module` 字面量 | 两种语言共用同一套 external / outside / unknown / opaque 计数语义；调用图（M2）精度会低于 TS |
+
+`unresolved.opaque` 记录 `import()` / `require()` / `import_module()` 的参数不是字符串字面量的调用。Archify 的 `bin` 通过 `spawnSync` 和计算路径的 `import()` 调渲染器，静态分析看不到这些边——计数把这个漏报明示出来，而不是让图上凭空少一条边。
 
 函数级度量在提取阶段直接从 AST 算出并随符号一起输出，**不持久化 CFG**：圈复杂度、认知复杂度（SonarSource 公开定义）、最大嵌套、分支数、返回点数、LOC。
 
@@ -118,9 +120,19 @@ interface Rule {
 
 ### 2.5 桥接层 `bridge/`
 
-模块图 + findings → Archify `architecture` IR，节点 `sources` 指向模块入口（≤3），`meta.repository` 带 40 位 sha，节点数超过 12 时按 fan-in + fan-out 取 top-N 其余折叠，findings 作为节点 card，两 commit 对比复用 `archify compare`。
+模块图（+ 日后的 findings）→ Archify `architecture` IR（`schema_version: 1`）。只使用 Archify 现有字段，不扩展 IR。
 
-新增：`coupling/*` 与 `impact/*` 的 finding 可附带 `views`（Archify guided views，≤5 章）——例如"环路径"一章、"热点模块"一章，让图直接讲分析结论。
+- **节点**：模块 → component，`type` 一律 `backend`，除非配置 `bridge.types` 显式映射；`sublabel` 写文件数与 LOC，`tag` 写 fan-in / fan-out。不从名字推断语义色。
+- **节点上限 12**：超出时按"整组兄弟折叠到父目录"的方式收敛（最深的父目录先折），保证一个父目录不会一半展开一半折叠；仍超出则按度数取 top-N，其余并入 `other`。折叠情况写进 card。
+- **边**：模块间依赖 → connection，`label` 写 `N imports`；`bridge.minWeight` 可隐藏弱边，隐藏数量写进 card。
+- **布局**：Archify 没有自动布局，桥接层用 `layout.mode: grid` 自己排：按最长路径分层（DFS 去环），**每个模块独占一列**（列序按 instability 升序，sink 在左、source 在右），每条边显式 `via`：源底部 → 该行下方 gap 内的私有 lane → 目标顶部；反向边从顶部走上方的 gap。同一 gap 内 lane 顺序按"谁的端点落在谁的区间内"排序，尽量避免交叉；嵌套区间的交叉不可避免。
+- **质量档位**：默认 `quality_profile: standard`。真实依赖图通常非平面，Archify `showcase` 拒绝任何交叉，所以 showcase 只对稀疏图可行（`bridge.qualityProfile` 可覆盖）。
+- **证据模式**由事实决定而非开关：`repository.revision` 是 40 位 sha 且 origin 是 github.com（ssh 形式会归一成 https）时，写 `meta.repository` 与每个节点的 `sources`（模块入口，≤3），交给 `archify deliver --repo-root` 验证；否则产出 source-free IR。
+- 两 commit 对比复用 `archify compare`。
+
+**overlay（`overlay/inject.mjs`）— 当前的主展示路径**。bridge 自动生成的模块图比 Archify 手绘图细得多，2026-09 决定暂不作为主路径，只保留为 bridge 的能力。展示走这条：Archify 的图可以由 agent 读代码手写（运行时视角，有语义），Bauify 的模块事实叠在它上面：`bauify overlay <delivered.html> <ir.json> <module-graph.json> --out <new.html>` 在交付的 HTML 末尾注入一段数据、一段样式、一段脚本，加一个 "Code analysis" 工具栏按钮；开启时原图和 guided views 淡化、画出模块间 import 边、点节点显示文件数 / LOC / fan-in / fan-out 和带 file:line 证据的边列表；关闭时就是 Archify 原样。交付的 HTML 永远不被改写（`--out` 不能等于输入），所以 `deliver` 的 sha 回执仍然对原文件成立。组件到模块的映射默认由 IR 的 `sources` 推出，`--map` 可显式指定；没被任何组件认领的模块列为 "not on diagram" 而不是丢掉。页面里嵌入的是完整的 Bauify 数据集（模块图 + `raw-facts` 的每个文件及其 import 计数），面板里每个组件展开能看到文件表；`--findings findings.json` 可把 evaluate 层的输出一并嵌入，finding 按 `subject.file` / `subject.component` 挂到对应文件或组件上，面板的 Findings 段落就是为后续 `coupling/*`、`redundancy/*` 预留的位置。开启分析模式时不画 import 连线，每个组件只多一个状态点：红 = 有文件参与加载期会出问题的 import 环，黄 = 环只靠惰性 import 闭合、或只在包级存在、或有 hub 告警，绿 = 无，灰 = 没有代码映射；点击组件才显示指标、文件表、边证据和 findings——保证 Archify 的图始终是主角。根目录散文件各自成模块（`main.py` → `main`，`config.py` → `config`），否则入口与常量表合并会制造假环。
+
+后续：`coupling/*` 与 `impact/*` 的 finding 可附带 `views`（Archify guided views，≤5 章），让图直接讲分析结论。
 
 ### 2.6 LLM 解释层（可选，`explain/`）
 
@@ -164,7 +176,8 @@ interface Rule {
 
 | code | 级别 | confidence | 检测 | 依赖的图 |
 |---|---|---|---|---|
-| `coupling/cycle` | error | 1.0 | 模块级强连通分量 | Module |
+| `coupling/import-cycle` | info / warning / error | 1.0 | 文件级强连通分量（raw-facts）。分级：仅由函数内 lazy import 闭合 → info（无 eager 环，导入期不执行，常见于"LLM 调 tool、tool 回调 LLM"的运行时协作）；全部模块作用域 import → warning（Python 一般能加载：后加载的一方在 `sys.modules` 里拿到部分初始化的模块，行为取决于导入顺序）；能从事实证明失败 → error（B 里 `from A import X`，而 A 绑定 X 的行在通向 B 的 import 之后，证据给出会失败的加载顺序）。有环是事实，不是结论：`evidence.risk.loading` 记 none-at-import / order-dependent / proven-failure | Raw facts（含 symbols） |
+| `coupling/cycle` | info | 1.0 | 模块（包）级强连通分量；可能只是目录分组的产物，指向 `import-cycle` 看文件层是否真有环 | Module |
 | `coupling/layer-violation` | error | 1.0 | 违反配置声明的分层 | Module |
 | `coupling/pattern-deviation` | warning | 0.5 | **无显式分层时**：对每对目录计算主导依赖方向，逆主导方向且权重 < 20% 的边视为偏离；可限定只看 `--since <ref>` 之后新增的边 | Module, Git |
 | `coupling/hub` | warning | 1.0 | fan-in ≥ 5 且 fan-out ≥ 5 | Module |
@@ -254,7 +267,7 @@ bauify/
   extract/
     index.mjs
     ts/                         ← TypeScript Compiler API 适配器
-    py/                         ← 第二阶段
+    py/                         ← 标准库 ast 提取脚本 + Node 解析
   graphs/
     symbol.mjs  module.mjs  call.mjs  test.mjs  git-change.mjs
     grouping.mjs                ← 模块聚合策略
@@ -263,6 +276,7 @@ bauify/
     rules/{coupling,complexity,redundancy,error-handling,impact,ai-smell}/
   report/index.mjs
   bridge/to-archify.mjs
+  overlay/inject.mjs            ← 把模块事实叠到 Archify 交付的 HTML 上（新文件）
   explain/                      ← 可选，prompt 模板 + 证据引用校验
   test/
     fixtures/<rule>/            ← 每条规则一个最小合成仓库 + 预期 findings
@@ -304,16 +318,16 @@ M1 验收：对 Archify 的 `archify/` 包自举画出 `bin → renderers/<type>
 
 ## 8. 里程碑
 
-进度：M1 第一步（`extract` → `raw-facts.json`）已完成并经 Archify 作者 review 修正（PR #352），见 `bin/analyze.mjs`、`extract/`、`test/`。下一步是 `graphs/module.mjs` 与 `coupling/cycle`、`coupling/layer-violation`。
+进度（2026-09-09）：`extract`（TS + Python）、`graphs`（Module Graph）、`evaluate`（`coupling/import-cycle` 三级、`coupling/cycle`、`coupling/hub`）、`bridge`、`overlay`、`run` 已完成，对 Archify 的 `archify/` 包和 AI-voice-assistant 两个仓库端到端跑通 `archify deliver`（standard 档位，9/9 检查，证据验证通过），截图见 `docs/e2e/`。Python 适配器因端到端测试需要而从 M6 提前到 M1。下一步是 `coupling/layer-violation`、冗余规则与布局压缩。
 
 | # | 内容 | 产出 |
 |---|---|---|
-| M1 | TS 提取 + Module Graph + `coupling/cycle`、`layer-violation` + bridge | archify 自举图 |
+| M1 | TS + Python 提取 + Module Graph + bridge + `run` + overlay + `coupling/import-cycle`/`cycle`/`hub`（已完成）；`layer-violation`；布局压缩 | 两个真实仓库的端到端图 |
 | M2 | Symbol / Call / Git 图 + 其余 `coupling/*` + `complexity/*` | 耦合与复杂度完整 |
 | M3 | `redundancy/*`（重复块、死导出、pass-through、单实现抽象） | 冗余分析 |
 | M4 | Test 图 + `impact/*` + `error-handling/*` + `ai-smell/*` + `--since` | PR 审查用法可用 |
 | M5 | `report` 维度汇总 + `--fail-on` 门禁 + 可选 `explain` | fitness function + 解释 |
-| M6 | Python 适配器 | 第二语言 |
+| M6 | 第三种语言适配器（按需求定，Java 候选） | 第三语言 |
 
 ---
 
@@ -322,6 +336,8 @@ M1 验收：对 Archify 的 `archify/` 包自举画出 `bin → renderers/<type>
 - 模块聚合默认深度 2 对 monorepo 是否合适；可能需要按 `workspaces` 自动切换到包边界。
 - `pattern-deviation` 的"主导方向"阈值（20%）需要在真实仓库标定。
 - Python 调用图是否值得引入 `pycg`（研究级工具，维护状态一般），还是先只做 import 级。
+- 布局压缩：目前一列一模块，顶层模块多则图很宽、依赖链深则图很高。方案是把区间不冲突的模块放进同一列，或在同一行内并排多个模块并用 `channelX` 分道。
+- Archify 在 showcase 下对 40+ 条边的图返回了 `internal/unclassified`（"Renderer failed before emitting a structured diagnostic"），应是诊断负载过大触发的上游问题，值得回报给 tt-a1i。
 - `explain` 层是否放进本仓库，还是作为一段 prompt 由调用方 agent 自己完成。
 - 是否要为 Archify 之外的消费者（如 Mermaid、Graphviz）增加第二个 bridge——只有在有真实需求时才做。
 

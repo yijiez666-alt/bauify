@@ -17,8 +17,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      # The self-bootstrap tests analyze Archify's renderer package at a pinned revision.
-      - name: Check out Archify (pinned) for the self-bootstrap tests
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # The self-bootstrap and bridge-validation tests analyze Archify's renderer
+      # package at a pinned revision and run Archify's own validator on the IR.
+      - name: Check out Archify (pinned)
         uses: actions/checkout@v5
         with:
           repository: tt-a1i/archify

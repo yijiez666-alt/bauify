@@ -88,19 +88,19 @@ test('an in-root directory whose name starts with ".." is not classified as outs
   const edge = facts.imports.find((i) => i.from === 'entry.mjs');
   assert.equal(edge.resolved, true);
   assert.equal(edge.to, '..generated/table.mjs');
-  assert.deepEqual(facts.unresolved, { external: 0, outside: 0, unknown: 0 });
+  assert.deepEqual(facts.unresolved, { external: 0, outside: 0, unknown: 0, opaque: 0 });
 });
 
 test('raw-facts schema requires unresolved counters and enforces the resolved/to invariant', async () => {
   const { schemaErrors } = await import('../extract/shared/schema.mjs');
   const base = {
     schema_version: 1,
-    repository: { root: '.', revision: null, language: 'ts', adapter: 'typescript@test' },
+    repository: { root: '.', revision: null, url: null, language: 'ts', adapter: 'typescript@test' },
     files: [{ path: 'a.mjs', loc: 1, role: 'source' }],
     imports: [],
     symbols: [],
     calls: [],
-    unresolved: { external: 0, outside: 0, unknown: 0 },
+    unresolved: { external: 0, outside: 0, unknown: 0, opaque: 0 },
   };
   assert.deepEqual(schemaErrors('raw-facts', base), []);
 

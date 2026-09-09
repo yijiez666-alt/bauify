@@ -9,6 +9,8 @@ import { describeRepository } from '../shared/git.mjs';
 export const id = 'ts';
 
 const SOURCE_EXT = /\.(?:[mc]?[jt]s|[jt]sx)$/;
+// Placeholder specifier for import()/require() calls whose argument is not a string literal.
+export const OPAQUE = '<computed>';
 
 export function detect(root, config) {
   return listFiles(root, config).some((f) => SOURCE_EXT.test(f));
@@ -30,7 +32,7 @@ export function extract(root, config) {
   });
   const checker = program.getTypeChecker();
   const imports = [];
-  const unresolved = { external: 0, outside: 0, unknown: 0 };
+  const unresolved = { external: 0, outside: 0, unknown: 0, opaque: 0 };
   const fileRecords = [];
 
   for (const rel of files) {
@@ -40,7 +42,7 @@ export function extract(root, config) {
     for (const found of collectImports(source, checker)) {
       const record = { from: rel, specifier: found.specifier, kind: found.kind, line: found.line, resolved: false };
       if (found.names.length) record.names = found.names;
-      const target = resolve(found.specifier, abs, absRoot, fileSet);
+      const target = found.opaque ? { reason: 'opaque' } : resolve(found.specifier, abs, absRoot, fileSet);
       if (target.to) { record.to = target.to; record.resolved = true; }
       else unresolved[target.reason] += 1;
       imports.push(record);
@@ -52,7 +54,7 @@ export function extract(root, config) {
   const repo = describeRepository(absRoot);
   return {
     schema_version: 1,
-    repository: { root: repo.root, revision: repo.revision, language: 'ts', adapter: `typescript@${ts.version}` },
+    repository: { root: repo.root, revision: repo.revision, url: repo.url, language: 'ts', adapter: `typescript@${ts.version}` },
     files: fileRecords,
     imports,
     symbols: [],
@@ -79,12 +81,19 @@ function collectImports(source, checker) {
       found.push({ specifier: node.moduleReference.expression.text, kind: 'require', line: lineOf(source, node), names: ['*'] });
     } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
       found.push({ specifier: node.moduleSpecifier.text, kind: 'export', line: lineOf(source, node), names: exportedNames(node.exportClause) });
-    } else if (ts.isCallExpression(node) && node.arguments.length && ts.isStringLiteralLike(node.arguments[0])) {
-      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-        found.push({ specifier: node.arguments[0].text, kind: 'dynamic', line: lineOf(source, node), names: [] });
-      } else if (ts.isIdentifier(node.expression) && node.expression.text === 'require'
-        && isModuleRequire(node.expression, checker)) {
-        found.push({ specifier: node.arguments[0].text, kind: 'require', line: lineOf(source, node), names: [] });
+    } else if (ts.isCallExpression(node) && node.arguments.length) {
+      const isImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = !isImport && ts.isIdentifier(node.expression) && node.expression.text === 'require'
+        && isModuleRequire(node.expression, checker);
+      if (isImport || isRequire) {
+        const kind = isImport ? 'dynamic' : 'require';
+        if (ts.isStringLiteralLike(node.arguments[0])) {
+          found.push({ specifier: node.arguments[0].text, kind, line: lineOf(source, node), names: [] });
+        } else {
+          // A computed specifier (import(pathToFileURL(...)), require(name)) cannot
+          // be resolved statically; it is recorded so the miss stays visible.
+          found.push({ specifier: OPAQUE, kind, line: lineOf(source, node), names: [], opaque: true });
+        }
       }
     }
     ts.forEachChild(node, visit);

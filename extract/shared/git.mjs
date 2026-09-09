@@ -12,8 +12,9 @@ function git(cwd, args) {
 // top level. Both are null-safe: a non-Git directory still extracts.
 export function describeRepository(analyzedRoot) {
   const top = git(analyzedRoot, ['rev-parse', '--show-toplevel']);
-  if (!top) return { revision: null, root: '.' };
+  if (!top) return { revision: null, root: '.', url: null };
   const rel = toPosix(path.relative(fs.realpathSync(top), fs.realpathSync(analyzedRoot))) || '.';
   const revision = git(analyzedRoot, ['rev-parse', 'HEAD']);
-  return { revision: revision && /^[a-f0-9]{40}$/.test(revision) ? revision : null, root: rel };
+  const url = git(analyzedRoot, ['remote', 'get-url', 'origin']);
+  return { revision: revision && /^[a-f0-9]{40}$/.test(revision) ? revision : null, root: rel, url: url || null };
 }

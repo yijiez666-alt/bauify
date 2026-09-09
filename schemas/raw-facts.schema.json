@@ -14,7 +14,8 @@
       "properties": {
         "root": { "type": "string", "minLength": 1, "description": "Analyzed directory, relative to the Git repository root (\".\" when equal)." },
         "revision": { "type": ["string", "null"], "pattern": "^[a-f0-9]{40}$" },
-        "language": { "enum": ["ts"] },
+        "url": { "type": ["string", "null"], "description": "Git origin URL as configured; null when there is no Git repository or no origin." },
+        "language": { "enum": ["ts", "py"] },
         "adapter": { "type": "string" }
       }
     },
@@ -44,23 +45,49 @@
           "kind": { "enum": ["static", "dynamic", "require", "export"] },
           "line": { "type": "integer", "minimum": 1 },
           "resolved": { "type": "boolean" },
-          "names": { "type": "array", "items": { "type": "string" } }
+          "names": { "type": "array", "items": { "type": "string" } },
+          "lazy": { "const": true, "description": "The import statement sits inside a function body and runs only when it is called (Python). Absent means module scope." }
         },
         "if": { "properties": { "resolved": { "const": true } } },
         "then": { "required": ["to"] },
         "else": { "not": { "required": ["to"] } }
       }
     },
-    "symbols": { "type": "array", "description": "Reserved for M2 (Symbol Graph).", "items": { "type": "object" } },
+    "symbols": {
+      "type": "array",
+      "description": "Module-scope bindings per file (Python adapter): the line where a name becomes bound at import time. Used to prove partially-initialised-module failures in import cycles. Empty for adapters that do not emit them.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "name", "kind", "line"],
+        "properties": {
+          "file": { "$ref": "#/$defs/repoPath" },
+          "name": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["function", "class", "variable", "import"] },
+          "line": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
     "calls": { "type": "array", "description": "Reserved for M2 (Call Graph).", "items": { "type": "object" } },
+    "parse_errors": {
+      "type": "array",
+      "description": "Files the adapter could not parse; they keep their file record but contribute no imports.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "message"],
+        "properties": { "path": { "$ref": "#/$defs/repoPath" }, "message": { "type": "string" } }
+      }
+    },
     "unresolved": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["external", "outside", "unknown"],
+      "required": ["external", "outside", "unknown", "opaque"],
       "properties": {
         "external": { "type": "integer", "minimum": 0, "description": "Bare or node: specifiers." },
         "outside": { "type": "integer", "minimum": 0, "description": "Resolved to a file outside the analyzed root." },
-        "unknown": { "type": "integer", "minimum": 0, "description": "Path-like specifier that could not be resolved." }
+        "unknown": { "type": "integer", "minimum": 0, "description": "Path-like specifier that could not be resolved." },
+        "opaque": { "type": "integer", "minimum": 0, "description": "Dynamic import/require whose specifier is not a string literal (recorded as \"<computed>\")." }
       }
     }
   },
