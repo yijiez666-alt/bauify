@@ -5,18 +5,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { REPO_ROOT, runCli } from './helpers.mjs';
+import { ARCHIFY_AVAILABLE, ARCHIFY_PACKAGE, runCli } from './helpers.mjs';
 import { schemaErrors } from '../extract/shared/schema.mjs';
 
-const ARCHIFY = path.join(REPO_ROOT, 'archify');
-const OUT_A = path.join(process.env.TMPDIR || os.tmpdir(), 'archify-analyzers-self-a.json');
-const OUT_B = path.join(process.env.TMPDIR || os.tmpdir(), 'archify-analyzers-self-b.json');
+const ARCHIFY = ARCHIFY_PACKAGE;
+const SKIP = ARCHIFY_AVAILABLE ? false : 'set BAUIFY_ARCHIFY_ROOT to a tt-a1i/archify checkout';
+const OUT_A = path.join(process.env.TMPDIR || os.tmpdir(), 'bauify-self-a.json');
+const OUT_B = path.join(process.env.TMPDIR || os.tmpdir(), 'bauify-self-b.json');
 
 function edges(facts, from) {
   return facts.imports.filter((i) => i.from === from && i.resolved).map((i) => i.to).sort();
 }
 
-test('extract: archify/ self-bootstrap passes schema and is byte-for-byte deterministic', () => {
+test('extract: archify/ self-bootstrap passes schema and is byte-for-byte deterministic', { skip: SKIP }, () => {
   assert.equal(runCli(['extract', ARCHIFY, '--out', OUT_A]).status, 0);
   assert.equal(runCli(['extract', ARCHIFY, '--out', OUT_B]).status, 0);
   assert.equal(fs.readFileSync(OUT_A, 'utf8'), fs.readFileSync(OUT_B, 'utf8'));
@@ -26,9 +27,9 @@ test('extract: archify/ self-bootstrap passes schema and is byte-for-byte determ
   assert.match(facts.repository.revision, /^[a-f0-9]{40}$/);
 });
 
-test('extract: hand-verified import lists for two archify files', () => {
+test('extract: hand-verified import lists for two archify files', { skip: SKIP }, () => {
   // Independent of test ordering: this test produces its own extraction.
-  const OUT_C = path.join(process.env.TMPDIR || os.tmpdir(), 'archify-analyzers-self-c.json');
+  const OUT_C = path.join(process.env.TMPDIR || os.tmpdir(), 'bauify-self-c.json');
   assert.equal(runCli(['extract', ARCHIFY, '--out', OUT_C]).status, 0);
   const facts = JSON.parse(fs.readFileSync(OUT_C, 'utf8'));
   // renderers/shared/validator.mjs — verified by hand against its two import lines.

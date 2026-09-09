@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Advisory reviews only: humans decide, CI and branch rules stay authoritative.
+language: en-US
+tone_instructions: >-
+  Be concise and constructive. Prioritize concrete defects, non-determinism,
+  and missing evidence. Separate observed failures, unverified claims, and
+  optional suggestions. Avoid praise and style-only churn.
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  sequence_diagrams: false
+  suggested_labels: false
+  suggested_reviewers: false
+  auto_review:
+    enabled: true
+    drafts: false
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+  path_instructions:
+    - path: "**"
+      instructions: >-
+        Bauify is an evidence-first static analyzer (see ARCHITECTURE.md).
+        Every finding must trace to a file, line, edge, or commit set; output
+        must be byte-deterministic (stable sort keys, no timestamps, no
+        locale-dependent ordering); the core never executes analyzed code and
+        never calls an LLM. Flag any change that weakens these invariants,
+        any threshold not sourced from config, and any schema change without
+        a matching test. Do not request features listed as non-goals.
+    - path: "extract/**"
+      instructions: >-
+        Check that unresolved imports are counted, never dropped; that path
+        classification is correct on Windows and POSIX; and that language
+        adapters expose no adapter-specific fields outside raw-facts.schema.json.
+    - path: "schemas/**"
+      instructions: >-
+        Require a regression test for every new required field or invariant.
+        Prefer if/then constraints over prose descriptions for invariants.
+    - path: "test/**"
+      instructions: >-
+        Tests must be order-independent and must skip, not fail, when the
+        optional Archify checkout is absent.

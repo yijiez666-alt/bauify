@@ -8,7 +8,7 @@ import { schemaErrors } from '../extract/shared/schema.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const USAGE = `Usage:
-  archify-analyze extract <repo-root> [--out file.json] [--config file.json] [--language ts] [--json]
+  bauify extract <repo-root> [--out file.json] [--config file.json] [--language ts] [--json]
 
 M1 implements only "extract". Later steps: graphs, evaluate, report, bridge.`;
 

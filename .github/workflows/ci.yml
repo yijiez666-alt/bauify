@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      # The self-bootstrap tests analyze Archify's renderer package at a pinned revision.
+      - name: Check out Archify (pinned) for the self-bootstrap tests
+        uses: actions/checkout@v5
+        with:
+          repository: tt-a1i/archify
+          ref: 06bd6fea5752bc06b8170a1f09085c798df5aa13
+          path: .archify
+      - run: npm ci
+      - run: npm test
+        env:
+          BAUIFY_ARCHIFY_ROOT: ${{ github.workspace }}/.archify

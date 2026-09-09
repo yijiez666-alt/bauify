@@ -1,18 +1,32 @@
 {
-  "name": "archify-analyzers",
+  "name": "bauify",
   "version": "0.1.0-dev.1",
   "private": true,
   "type": "module",
-  "description": "Deterministic, evidence-first static analysis that feeds Archify architecture IR.",
+  "description": "Deterministic, evidence-first code analysis that produces facts, findings, and Archify architecture IR.",
   "license": "MIT",
-  "bin": { "archify-analyze": "./bin/analyze.mjs" },
-  "engines": { "node": ">=18" },
+  "bin": {
+    "bauify": "./bin/analyze.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "extract:self": "node bin/analyze.mjs extract ../archify --out ../out/raw-facts.json"
+    "extract:archify": "node bin/analyze.mjs extract ../archify/archify --out out/raw-facts.json"
   },
   "devDependencies": {
     "ajv": "^8.17.1",
     "typescript": "^5.6.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yijiez666-alt/bauify.git"
+  },
+  "keywords": [
+    "static-analysis",
+    "architecture",
+    "dependency-graph",
+    "archify"
+  ]
 }
