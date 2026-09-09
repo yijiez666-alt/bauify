@@ -96,7 +96,7 @@ test('raw-facts schema requires unresolved counters and enforces the resolved/to
   const base = {
     schema_version: 1,
     repository: { root: '.', revision: null, url: null, language: 'ts', adapter: 'typescript@test' },
-    files: [{ path: 'a.mjs', loc: 1, role: 'source' }],
+    files: [{ path: 'a.mjs', loc: 1, role: 'source' }, { path: 'b.mjs', loc: 1, role: 'source' }],
     imports: [],
     symbols: [],
     calls: [],

@@ -36,7 +36,7 @@ test('run: the synthetic fixture folds into a hand-verified two-module graph', (
   ]);
   // src/index.mjs → helper (static + export) and lazy (dynamic): three file edges, one module edge.
   assert.deepEqual(graph.edges.map((e) => [e.from, e.to, e.weight, e.kinds]), [
-    ['src', 'src-lib', 3, { dynamic: 1, export: 1, static: 1 }],
+    ['src', 'src-lib', 3, { dynamic: 1, eager: 2, export: 1, lazy: 1, static: 1 }],
   ]);
   assert.equal(graph.edges[0].evidence.length, 3);
   assert.deepEqual(result.json.bridge, { components: 2, connections: 1, evidence: true, folded: 0, layers: 2 });

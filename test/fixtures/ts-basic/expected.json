@@ -77,21 +77,24 @@
       "kind": "dynamic",
       "line": 7,
       "resolved": true,
-      "to": "src/lib/lazy.mjs"
+      "to": "src/lib/lazy.mjs",
+      "lazy": true
     },
     {
       "from": "src/index.mjs",
       "specifier": "./lib/does-not-exist.mjs",
       "kind": "dynamic",
       "line": 8,
-      "resolved": false
+      "resolved": false,
+      "lazy": true
     },
     {
       "from": "src/index.mjs",
       "specifier": "<computed>",
       "kind": "dynamic",
       "line": 9,
-      "resolved": false
+      "resolved": false,
+      "lazy": true
     },
     {
       "from": "test/index.test.mjs",

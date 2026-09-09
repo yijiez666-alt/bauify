@@ -46,7 +46,10 @@
           "line": { "type": "integer", "minimum": 1 },
           "resolved": { "type": "boolean" },
           "names": { "type": "array", "items": { "type": "string" } },
-          "lazy": { "const": true, "description": "The import statement sits inside a function body and runs only when it is called (Python). Absent means module scope." }
+          "lazy": { "const": true, "description": "Import occurs in a deferred body. Its caller may still run during module initialization; this is not a safety guarantee." },
+          "typeOnly": { "const": true, "description": "Type-only dependency, excluded from runtime import-cycle analysis." },
+          "conditional": { "const": true, "description": "Execution depends on a guard, exception, or loop not evaluated by the analyzer." },
+          "implicit": { "const": true, "description": "Python package initializer loaded by this import; line points to the initiating statement." }
         },
         "if": { "properties": { "resolved": { "const": true } } },
         "then": { "required": ["to"] },

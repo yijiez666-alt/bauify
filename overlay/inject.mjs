@@ -3,7 +3,7 @@
 // The delivered artifact is never modified; a new file is written next to it.
 // The overlay adds one toolbar button ("Code analysis"). When it is on, the
 // authored diagram and guided views recede and every mapped component gets a
-// status ring around its box: pulsing red when a load-time import failure is proven,
+// status ring around its box: pulsing red for supplied error findings,
 // amber when a rule warns (eager cycle, hub), blue when only informational facts exist
 // (lazy/runtime or package-level cycle), green when nothing fired, grey when no code maps to it.
 // A legend next to the hint spells out the danger level behind each colour.
@@ -106,9 +106,8 @@ function indicators(set, mods, findings, mapping, filePaths) {
   if (!mods.length) return { status: 'grey', items: [] };
   const owner = new Map();
   for (const [cid, ids] of mapping) for (const id of ids) owner.set(id, cid);
-  // Tiers follow the rule's severities: red = a load-time failure proven from the facts,
-  // amber = an eager cycle whose behaviour depends on import order, blue = a cycle that
-  // exists only through lazy imports or at package level (a coupling fact, no import risk).
+  // Tiers follow reported severity. Current cycle rules use warning or info;
+  // neither a deferred cycle nor a missing finding establishes import safety.
   const fileCycles = findings.filter((f) => f.code === 'coupling/import-cycle' && f.subject.files.some((p) => filePaths.has(p)));
   const proven = fileCycles.filter((f) => f.severity === 'error');
   const eagerFileCycles = fileCycles.filter((f) => f.evidence.kind === 'eager' && f.severity !== 'error');
@@ -119,11 +118,11 @@ function indicators(set, mods, findings, mapping, filePaths) {
   const internalOnly = cycles.length > 0 && partners.size === 0;
   const cycleStatus = proven.length ? 'red' : eagerFileCycles.length ? 'amber' : (lazyFileCycles.length || cycles.length) ? 'blue' : 'green';
   const cycleValue = proven.length
-    ? `import cycle that fails at load time (${proven.map((f) => f.subject.files.length).join(', ')} files) ${proven[0].evidence.risk ? ` — ${proven[0].evidence.risk.loadingNote}` : ""}`
+    ? `reported import-cycle error (${proven.map((f) => f.subject.files.length).join(', ')} files) ${proven[0].evidence.risk ? ` — ${proven[0].evidence.risk.loadingNote}` : ""}`
     : eagerFileCycles.length
-      ? `eager import cycle (${eagerFileCycles.map((f) => f.subject.files.length).join(', ')} files); loads today, import-order dependent`
+      ? `module-scope import cycle (${eagerFileCycles.map((f) => f.subject.files.length).join(', ')} files); load-time behavior unverified`
       : lazyFileCycles.length
-        ? `runtime cycle closed by lazy imports (${lazyFileCycles.map((f) => f.subject.files.length).join(', ')} files); no import-time risk`
+        ? `cycle with deferred or conditional imports (${lazyFileCycles.map((f) => f.subject.files.length).join(', ')} files); initialization behavior not proven`
         : cycles.length
           ? (internalOnly ? 'package-level cycle inside this component; no file cycles' : `package-level cycle with ${partners.size} other${partners.size === 1 ? '' : 's'}; no file cycles`)
           : 'none';
@@ -167,8 +166,9 @@ function indexFiles(graph, facts) {
   const byDepth = [...graph.modules].sort((a, b) => b.path.split('/').length - a.path.split('/').length);
   const excluded = new Set(graph.excluded.roles || []);
   const moduleOf = (file) => {
+    if (graph.fileModules) return graph.fileModules[file] || null;
     for (const m of byDepth) { if (m.path === '') continue; if (file === m.path || file.startsWith(`${m.path}/`)) return m.id; }
-    return file.includes('/') ? null : (graph.modules.find((m) => m.path === '') || {}).id || null;
+    return file.includes('/') ? null : (graph.modules.find((m) => m.path === '' && m.entry.includes(file)) || {}).id || null;
   };
   const out = new Map(); const inn = new Map();
   for (const i of facts.imports) if (i.resolved) { out.set(i.from, (out.get(i.from) || 0) + 1); inn.set(i.to, (inn.get(i.to) || 0) + 1); }
@@ -190,11 +190,12 @@ function resolveMapping(ir, graph, map) {
   const byPathDepth = [...graph.modules].sort((a, b) => b.path.split('/').length - a.path.split('/').length);
   const moduleForFile = (file) => {
     const rel = graph.repository.root && graph.repository.root !== '.' && file.startsWith(`${graph.repository.root}/`) ? file.slice(graph.repository.root.length + 1) : file;
+    if (graph.fileModules && graph.fileModules[rel]) return graph.fileModules[rel];
     for (const m of byPathDepth) {
       if (m.path === '' ) continue;
       if (rel === m.path || rel.startsWith(`${m.path}/`)) return m.id;
     }
-    return rel.includes('/') ? null : (graph.modules.find((m) => m.path === '') || {}).id || null;
+    return rel.includes('/') ? null : (graph.modules.find((m) => m.path === '' && m.entry.includes(rel)) || {}).id || null;
   };
   for (const c of ir.components) {
     if (map && Array.isArray(map[c.id])) { result.set(c.id, [...new Set(map[c.id])]); continue; }
@@ -386,9 +387,9 @@ const JS = `
   document.body.appendChild(codePane);
   // Danger levels behind the colours. Same wording everywhere: legend, badge, detail header.
   var LEVELS = {
-    red: { name: 'critical', text: 'a load-time import failure is proven from the facts' },
+    red: { name: 'critical', text: 'an error was reported; inspect its evidence and assumptions' },
     amber: { name: 'warning', text: 'eager import cycle (import-order dependent) or hub module' },
-    blue: { name: 'info', text: 'runtime or package-level cycle; coupling to know about, no import risk' },
+    blue: { name: 'info', text: 'structural coupling; initialization behavior is not established' },
     green: { name: 'clean', text: 'no rule fired' },
     grey: { name: 'unmapped', text: 'no source code maps to this component' },
     neutral: { name: 'metric', text: 'a number, not a verdict' }
@@ -553,7 +554,7 @@ const JS = `
     h += '<div class="level"><b>' + esc(lvl.name) + '</b> — ' + esc(ind.value) + (ind.status === 'neutral' ? '' : '<br>' + esc(lvl.text)) + '</div>';
     h += '<div class="k">Diagram details</div>' + diagram(c, key, fl);
     h += '<div class="k">Findings · ' + fl.length + '</div>';
-    if (!fl.length) h += '<div class="ev">' + (key === 'instability' ? 'Instability is a metric, not a rule: out / (in + out). 0 = everything depends on it (stable), 1 = it depends on everything (volatile).' : 'None for this indicator.') + '</div>';
+    if (!fl.length) h += '<div class="ev">' + (key === 'instability' ? 'Instability measures dependency direction: out / (in + out). 0 = no outgoing dependencies, 1 = no incoming dependents. It is not a failure probability or a quality verdict.' : 'No finding for this indicator; this is not a safety guarantee.') + '</div>';
     fl.forEach(function (f) { h += findingCard(f); });
     detail.innerHTML = h;
     detail.hidden = false;
@@ -617,7 +618,7 @@ const JS = `
   // Ring of the files (or modules) on the shortest cycle; lazy edges dashed.
   function cycleDiagram(c, fl) {
     var f = fl.filter(function (x) { return x.code === 'coupling/import-cycle'; })[0] || fl.filter(function (x) { return x.code === 'coupling/cycle'; })[0];
-    if (!f) return '<div class="ev">No cycle touches this component. Its files import others; nothing imports back.</div>';
+    if (!f) return '<div class="ev">No cycle was found in the recorded dependencies for this component. Unresolved or unmodeled execution may add dependencies.</div>';
     var isFile = f.code === 'coupling/import-cycle';
     var nodes = (f.evidence.path || []).slice(0, 8);
     if (nodes.length < 2) return '<div class="ev">Cycle path not recorded.</div>';
@@ -630,19 +631,19 @@ const JS = `
     for (var i = 0; i < nodes.length; i++) {
       var a = nodes[i], b = nodes[(i + 1) % nodes.length];
       if (isFile) {
-        var hit = imports.filter(function (v) { return v.file === a && v.to === b; })[0];
-        edges.push({ a: a, b: b, lazy: !!(hit && hit.lazy) });
+        var hit = (f.evidence.pathImports || imports).filter(function (v) { return v.file === a && v.to === b; })[0];
+        edges.push({ a: a, b: b, lazy: !!(hit && (hit.deferred || hit.lazy || hit.conditional)) });
       } else {
         var me = (f.evidence.edges || []).filter(function (v) { return v.from === a && v.to === b; })[0];
-        edges.push({ a: a, b: b, lazy: !!(me && me.lazy && me.lazy === me.weight) });
+        edges.push({ a: a, b: b, lazy: !!(me && (me.deferred || (me.lazy && me.lazy === me.weight))) });
       }
     }
     var svg = svgOpen(W, H);
     edges.forEach(function (e) { svg += arrow(pos[e.a], pos[e.b], bw, bh, color + (e.lazy ? ' lazy' : '')); });
     nodes.forEach(function (n) { svg += nodeRect(pos[n].x, pos[n].y, bw, bh, short(n), mine[n] ? 'focus' : ''); });
     svg += '</svg>';
-    return svg + '<div class="caption">' + (isFile ? 'Shortest file cycle. ' : 'Shortest package-level cycle. ') + 'Solid = module-scope import, dashed = function-scope (lazy) import; green box = belongs to this component. Line numbers are in the findings below. ' +
-      (f.evidence.kind === 'lazy-closed' ? 'The dashed edge is the only thing closing the loop, so nothing runs at import time.' : f.severity === 'error' ? 'Every edge runs at import time and the marked name is read before it is bound.' : 'Every edge runs at import time; safe as long as no name is read from the half-built side.') + '</div>';
+    return svg + '<div class="caption">' + (isFile ? 'Representative file cycle. ' : 'Representative package-level cycle. ') + 'Solid = recorded module-scope dependency; dashed = deferred, conditional, type-only or asynchronous dependency. Green box = belongs to this component. Line numbers are in the findings below. ' +
+      (f.evidence.kind !== 'eager' ? 'This dependency component contains deferred, conditional, or type-only edges. The drawing does not prove import-time safety.' : 'Module-scope dependency cycle. Inspect execution order and binding access; a graph alone does not prove failure.') + '</div>';
   }
   // Star: dependents on the left, dependencies on the right.
   function hubDiagram(c, fl) {

@@ -114,12 +114,29 @@ function evaluateGraph(graph, config, facts = null) {
   return findings;
 }
 
+function validateFacts(graph, facts) {
+  if (!facts) return;
+  const errors = schemaErrors('raw-facts', facts);
+  if (errors.length) fail('input/facts-incompatible', 'Raw facts violate the schema or reference invariants.', { evidence: { errors: errors.slice(0, 20) }, supportedFixes: ['regenerate raw-facts and module-graph together'] });
+  for (const key of ['root', 'revision', 'language']) {
+    if (graph.repository[key] !== undefined && graph.repository[key] !== facts.repository?.[key]) errors.push({ path: `/repository/${key}`, message: 'must match module-graph input' });
+  }
+  if (graph.fileModules && Array.isArray(facts.files)) {
+    const roles = new Set(graph.excluded.roles);
+    const files = new Set(facts.files.filter((f) => !roles.has(f.role)).map((f) => f.path));
+    const ownership = Object.keys(graph.fileModules);
+    if (ownership.length !== files.size || ownership.some((f) => !files.has(f))) errors.push({ path: '/files', message: 'must match module-graph file ownership' });
+  }
+  if (errors.length) fail('input/facts-incompatible', 'Raw facts are invalid or do not match the module graph.', { evidence: { errors: errors.slice(0, 20) }, supportedFixes: ['regenerate raw-facts and module-graph together'] });
+}
+
 function runEvaluate(opts) {
   const graph = readJsonInput(opts.positional[0], 'evaluate');
   const graphErrors = schemaErrors('module-graph', graph);
   if (graphErrors.length) fail('evaluate/input-schema-invalid', 'Input does not conform to module-graph.schema.json.', { evidence: { errors: graphErrors.slice(0, 20) }, supportedFixes: ['regenerate it with `bauify graphs`'] });
   const factsPath = opts.facts || path.join(path.dirname(path.resolve(opts.positional[0])), 'raw-facts.json');
   const facts = fs.existsSync(factsPath) ? readJsonInput(factsPath, 'evaluate --facts') : null;
+  validateFacts(graph, facts);
   const findings = evaluateGraph(graph, loadConfig(opts.config), facts);
   emit(findings, opts);
   return receipt('ok', { command: 'evaluate', out: opts.out ? path.resolve(opts.out) : null, rules: findings.rules, fileFacts: Boolean(facts), summary: findings.summary });
@@ -167,6 +184,7 @@ function runOverlay(opts) {
   // raw-facts.json next to module-graph.json is picked up automatically for per-file detail.
   const factsPath = opts.facts || path.join(path.dirname(path.resolve(graphPath)), 'raw-facts.json');
   const facts = fs.existsSync(factsPath) ? readJsonInput(factsPath, 'overlay --facts') : null;
+  validateFacts(graph, facts);
   const findingsPath = opts.findings || path.join(path.dirname(path.resolve(graphPath)), 'findings.json');
   const findingsDoc = fs.existsSync(findingsPath) ? readJsonInput(findingsPath, 'overlay --findings') : null;
   const findings = findingsDoc ? (Array.isArray(findingsDoc) ? findingsDoc : findingsDoc.diagnostics || []) : [];

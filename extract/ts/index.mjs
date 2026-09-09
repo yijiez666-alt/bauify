@@ -5,6 +5,7 @@ import path from 'node:path';
 import ts from 'typescript';
 import { classifyRole, lineCount, listFiles, toPosix } from '../shared/files.mjs';
 import { describeRepository } from '../shared/git.mjs';
+import { fail } from '../shared/diagnostics.mjs';
 
 export const id = 'ts';
 
@@ -25,10 +26,11 @@ const COMPILER_OPTIONS = {
 
 export function extract(root, config) {
   const absRoot = path.resolve(root);
-  const files = listFiles(absRoot, config);
+  const files = listFiles(absRoot, config).filter((f) => SOURCE_EXT.test(f));
+  const options = compilerOptions(absRoot);
   const fileSet = new Set(files);
   const program = ts.createProgram(files.map((rel) => path.join(absRoot, rel)), {
-    ...COMPILER_OPTIONS, noResolve: true, noLib: true, types: [],
+    ...options, noResolve: true, noLib: true, types: [],
   });
   const checker = program.getTypeChecker();
   const imports = [];
@@ -39,10 +41,12 @@ export function extract(root, config) {
     const abs = path.join(absRoot, rel);
     const source = program.getSourceFile(abs);
     fileRecords.push({ path: rel, loc: lineCount(source.text), role: classifyRole(rel, config.roles) });
-    for (const found of collectImports(source, checker)) {
+    for (const found of collectImports(source, checker, options)) {
       const record = { from: rel, specifier: found.specifier, kind: found.kind, line: found.line, resolved: false };
       if (found.names.length) record.names = found.names;
-      const target = found.opaque ? { reason: 'opaque' } : resolve(found.specifier, abs, absRoot, fileSet);
+      if (found.lazy) record.lazy = true;
+      if (found.typeOnly) record.typeOnly = true;
+      const target = found.opaque ? { reason: 'opaque' } : resolve(found.specifier, abs, absRoot, fileSet, options);
       if (target.to) { record.to = target.to; record.resolved = true; }
       else unresolved[target.reason] += 1;
       imports.push(record);
@@ -71,16 +75,32 @@ function lineOf(source, node) {
   return source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 }
 
-function collectImports(source, checker) {
+function compilerOptions(root) {
+  const configPath = ts.findConfigFile(root, ts.sys.fileExists, 'tsconfig.json');
+  if (!configPath) return COMPILER_OPTIONS;
+  const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (loaded.error) fail('extract/tsconfig-invalid', 'Cannot read tsconfig.json.', { subject: { file: configPath } });
+  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path.dirname(configPath));
+  const errors = parsed.errors.filter((e) => e.code !== 18003); // no input files is irrelevant to a subtree analysis
+  if (errors.length) fail('extract/tsconfig-invalid', 'Invalid TypeScript configuration.', { subject: { file: configPath }, evidence: { errors: errors.map((e) => ts.flattenDiagnosticMessageText(e.messageText, '\n')) } });
+  return { ...COMPILER_OPTIONS, ...parsed.options, allowJs: true };
+}
+
+function collectImports(source, checker, options) {
   const found = [];
   const visit = (node) => {
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      found.push({ specifier: node.moduleSpecifier.text, kind: 'static', line: lineOf(source, node), names: importedNames(node.importClause) });
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings;
+      const inlineTypesOnly = !clause?.name && bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly);
+      found.push({ specifier: node.moduleSpecifier.text, kind: 'static', line: lineOf(source, node), names: importedNames(clause), typeOnly: Boolean(clause?.isTypeOnly || (inlineTypesOnly && !options.verbatimModuleSyntax)) });
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)
       && node.moduleReference.expression && ts.isStringLiteral(node.moduleReference.expression)) {
-      found.push({ specifier: node.moduleReference.expression.text, kind: 'require', line: lineOf(source, node), names: ['*'] });
+      found.push({ specifier: node.moduleReference.expression.text, kind: 'require', line: lineOf(source, node), names: ['*'], typeOnly: Boolean(node.isTypeOnly) });
     } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      found.push({ specifier: node.moduleSpecifier.text, kind: 'export', line: lineOf(source, node), names: exportedNames(node.exportClause) });
+      const clause = node.exportClause;
+      const inlineTypesOnly = clause && ts.isNamedExports(clause) && clause.elements.length > 0 && clause.elements.every((e) => e.isTypeOnly);
+      found.push({ specifier: node.moduleSpecifier.text, kind: 'export', line: lineOf(source, node), names: exportedNames(clause), typeOnly: Boolean(node.isTypeOnly || (inlineTypesOnly && !options.verbatimModuleSyntax)) });
     } else if (ts.isCallExpression(node) && node.arguments.length) {
       const isImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
       const isRequire = !isImport && ts.isIdentifier(node.expression) && node.expression.text === 'require'
@@ -88,11 +108,11 @@ function collectImports(source, checker) {
       if (isImport || isRequire) {
         const kind = isImport ? 'dynamic' : 'require';
         if (ts.isStringLiteralLike(node.arguments[0])) {
-          found.push({ specifier: node.arguments[0].text, kind, line: lineOf(source, node), names: [] });
+          found.push({ specifier: node.arguments[0].text, kind, line: lineOf(source, node), names: [], lazy: inFunctionBody(node) });
         } else {
           // A computed specifier (import(pathToFileURL(...)), require(name)) cannot
           // be resolved statically; it is recorded so the miss stays visible.
-          found.push({ specifier: OPAQUE, kind, line: lineOf(source, node), names: [], opaque: true });
+          found.push({ specifier: OPAQUE, kind, line: lineOf(source, node), names: [], opaque: true, lazy: inFunctionBody(node) });
         }
       }
     }
@@ -100,6 +120,16 @@ function collectImports(source, checker) {
   };
   visit(source);
   return found;
+}
+
+function inFunctionBody(node) {
+  for (let current = node; current.parent; current = current.parent) {
+    const parent = current.parent;
+    if (ts.isFunctionLike(parent) && (parent.body === current || parent.parameters?.includes(current))) return true;
+    // Instance field initializers run on construction, unlike static fields.
+    if (ts.isPropertyDeclaration(parent) && parent.initializer === current && !parent.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword)) return true;
+  }
+  return false;
 }
 
 // Native CommonJS require has no source declaration. Also preserve the common
@@ -143,12 +173,12 @@ function exportedNames(clause) {
   return clause.elements.map((el) => (el.propertyName || el.name).text).sort();
 }
 
-function resolve(specifier, containingFile, absRoot, fileSet) {
+function resolve(specifier, containingFile, absRoot, fileSet, options) {
   const isPathLike = specifier.startsWith('.') || specifier.startsWith('/');
-  if (!isPathLike) return { reason: 'external' };
-  const result = ts.resolveModuleName(specifier, containingFile, COMPILER_OPTIONS, ts.sys);
+  const result = ts.resolveModuleName(specifier, containingFile, options, ts.sys);
   const resolvedFile = result.resolvedModule?.resolvedFileName;
-  if (!resolvedFile) return { reason: 'unknown' };
+  if (!resolvedFile) return { reason: isPathLike ? 'unknown' : 'external' };
+  if (result.resolvedModule.isExternalLibraryImport || resolvedFile.split(path.sep).join('/').includes('/node_modules/')) return { reason: 'external' };
   const rel = toPosix(path.relative(absRoot, resolvedFile));
   // Only a parent-directory result is outside the root; an in-root directory whose
   // name merely starts with ".." (e.g. "..generated/") must not be misclassified.

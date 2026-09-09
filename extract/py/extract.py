@@ -35,45 +35,138 @@ def literal_module(node):
 
 
 def collect(tree):
-    """Walk with scope tracking: an import statement inside a def/async def is
-    executed only when that function runs, so it is marked lazy. Lazy imports
-    are how Python code deliberately dodges import-time cycles; the module
-    graph keeps them as edges but the cycle rule reports them separately."""
-    found = []
-    lazy_ranges = []
+    """Keep lexical scope separate from execution guarantees.
+
+    A function body is deferred, but its defaults/decorators are evaluated in
+    the enclosing scope. A deferred function may itself be called during
+    module initialization; `lazy` is deliberately not a proof of safety.
+    """
+    # Recognize typing aliases only when they have one unambiguous binding.
+    # Reassignment or shadowing anywhere makes this conservative: retain the
+    # possible runtime edge instead of incorrectly erasing it as type-only.
+    bindings = {}
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            lazy_ranges.append((node.lineno, getattr(node, "end_lineno", node.lineno)))
-    def is_lazy(line):
-        return any(a <= line <= b for a, b in lazy_ranges)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                found.append({"line": node.lineno, "kind": "static", "level": 0,
-                              "module": alias.name, "names": ["*"], "lazy": is_lazy(node.lineno)})
+        names = []
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names = [node.id]
+        elif isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)) and isinstance(node.value, ast.Name):
+            names = [node.value.id]
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names = [node.name]
+        elif isinstance(node, ast.arg):
+            names = [node.arg]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, ast.Import):
+            names = [a.asname or a.name.split(".")[0] for a in node.names]
         elif isinstance(node, ast.ImportFrom):
-            names = sorted(alias.name for alias in node.names)
-            found.append({"line": node.lineno, "kind": "static", "level": node.level or 0,
-                          "module": node.module or "", "names": names, "lazy": is_lazy(node.lineno)})
-        elif isinstance(node, ast.Call):
+            names = [a.asname or a.name for a in node.names]
+        for name in names:
+            bindings[name] = bindings.get(name, 0) + 1
+    typing_names, type_checks = {}, {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                name = a.asname or a.name
+                if a.name == "typing" and bindings.get(name) == 1:
+                    typing_names[name] = node.lineno
+        elif isinstance(node, ast.ImportFrom) and node.module == "typing" and not node.level:
+            for a in node.names:
+                name = a.asname or a.name
+                if a.name == "TYPE_CHECKING" and bindings.get(name) == 1:
+                    type_checks[name] = node.lineno
+
+    class Collector(ast.NodeVisitor):
+        def __init__(self):
+            self.found = []
+            self.flags = {}
+
+        def under(self, flags, nodes):
+            previous = self.flags
+            self.flags = {**previous, **flags}
+            for node in nodes:
+                self.visit(node)
+            self.flags = previous
+
+        def emit(self, node, **fields):
+            self.found.append({"line": node.lineno, **fields, **self.flags})
+
+        def visit_FunctionDef(self, node):
+            # Only the body is lazy, not default expressions or decorators.
+            for expr in node.decorator_list + node.args.defaults + [d for d in node.args.kw_defaults if d]:
+                self.visit(expr)
+            # Annotation evaluation varies with future annotations and Python
+            # versions. Keep imports in them as conditional evidence.
+            args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
+            args += [a for a in (node.args.vararg, node.args.kwarg) if a]
+            annotations = [a.annotation for a in args if a.annotation]
+            if node.returns:
+                annotations.append(node.returns)
+            self.under({"conditional": True}, annotations)
+            self.under({"lazy": True}, node.body)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Lambda(self, node):
+            for expr in node.args.defaults + [d for d in node.args.kw_defaults if d]:
+                self.visit(expr)
+            self.under({"lazy": True}, [node.body])
+
+        def visit_If(self, node):
+            test = node.test
+            negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            check = test.operand if negated else test
+            is_type_check = (
+                isinstance(check, ast.Name) and type_checks.get(check.id, float("inf")) < node.lineno
+            ) or (
+                isinstance(check, ast.Attribute) and check.attr == "TYPE_CHECKING"
+                and isinstance(check.value, ast.Name)
+                and typing_names.get(check.value.id, float("inf")) < node.lineno
+            )
+            self.visit(test)
+            if is_type_check:
+                self.under({"typeOnly": True}, node.orelse if negated else node.body)
+                self.under({}, node.body if negated else node.orelse)
+            else:
+                self.under({"conditional": True}, node.body + node.orelse)
+
+        def visit_Try(self, node):
+            self.under({"conditional": True}, node.body + node.handlers + node.orelse + node.finalbody)
+
+        visit_TryStar = visit_Try
+
+        def visit_For(self, node):
+            self.visit(node.iter)
+            self.under({"conditional": True}, node.body + node.orelse)
+
+        visit_AsyncFor = visit_For
+
+        def visit_While(self, node):
+            self.visit(node.test)
+            self.under({"conditional": True}, node.body + node.orelse)
+
+        def visit_Import(self, node):
+            for alias in node.names:
+                self.emit(node, kind="static", level=0, module=alias.name, names=["*"])
+
+        def visit_ImportFrom(self, node):
+            self.emit(node, kind="static", level=node.level or 0, module=node.module or "",
+                      names=sorted(alias.name for alias in node.names))
+
+        def visit_Call(self, node):
             func = node.func
-            target = None
-            if isinstance(func, ast.Attribute) and func.attr == "import_module" \
-                    and isinstance(func.value, ast.Name) and func.value.id == "importlib":
-                target = literal_module(node)
-            elif isinstance(func, ast.Name) and func.id == "__import__":
-                target = literal_module(node)
             is_loader = (isinstance(func, ast.Attribute) and func.attr == "import_module"
                          and isinstance(func.value, ast.Name) and func.value.id == "importlib") \
                 or (isinstance(func, ast.Name) and func.id == "__import__")
-            if is_loader and target is None:
-                found.append({"line": node.lineno, "kind": "dynamic", "level": 0,
-                              "module": "<computed>", "names": [], "opaque": True})
-            elif target is not None:
-                found.append({"line": node.lineno, "kind": "dynamic", "level": 0,
-                              "module": target, "names": []})
-    found.sort(key=lambda i: (i["line"], i["module"]))
-    return found
+            if is_loader:
+                target = literal_module(node)
+                self.emit(node, kind="dynamic", level=0, module=target or "<computed>",
+                          names=[], **({"opaque": True} if target is None else {}))
+            self.generic_visit(node)
+
+    collector = Collector()
+    collector.visit(tree)
+    return sorted(collector.found, key=lambda i: (i["line"], i["module"]))
 
 
 def module_bindings(tree):
@@ -101,7 +194,7 @@ def module_bindings(tree):
                 for t in node.targets:
                     for name in targets(t):
                         bind(name, "variable", node.lineno)
-            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
                 for name in targets(node.target):
                     bind(name, "variable", node.lineno)
             elif isinstance(node, ast.Import):

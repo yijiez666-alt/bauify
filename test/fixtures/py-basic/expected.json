@@ -81,6 +81,18 @@
       "line": 2,
       "resolved": true,
       "names": [
+        "*"
+      ],
+      "implicit": true,
+      "to": "app/util/__init__.py"
+    },
+    {
+      "from": "app/core.py",
+      "specifier": "app.util.text",
+      "kind": "static",
+      "line": 2,
+      "resolved": true,
+      "names": [
         "clean"
       ],
       "to": "app/util/text.py"
@@ -155,14 +167,16 @@
       "kind": "dynamic",
       "line": 9,
       "resolved": true,
-      "to": "app/core.py"
+      "to": "app/core.py",
+      "lazy": true
     },
     {
       "from": "app/util/text.py",
       "specifier": "<computed>",
       "kind": "dynamic",
       "line": 10,
-      "resolved": false
+      "resolved": false,
+      "lazy": true
     },
     {
       "from": "sibling.py",
@@ -205,6 +219,18 @@
       "names": [
         "*"
       ]
+    },
+    {
+      "from": "tests/test_core.py",
+      "specifier": "app.core",
+      "kind": "static",
+      "line": 1,
+      "resolved": true,
+      "names": [
+        "*"
+      ],
+      "implicit": true,
+      "to": "app/__init__.py"
     },
     {
       "from": "tests/test_core.py",

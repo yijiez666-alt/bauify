@@ -238,7 +238,25 @@ A cycle in a directed graph is a set of nodes that can all reach each other. **T
 
 ### Why the tiers
 
-`import-cycle` runs Tarjan twice: once over all resolved file imports, once over only the module-scope ones. An SCC that exists in the first pass but not the second is closed by lazy imports and is reported as **info** — nothing happens at import time. An SCC that survives the second pass is an eager cycle and is a **warning**, because Python generally tolerates it (section 4). It becomes an **error** only when `provePartialInit` finds a `from A import X` whose `X` is bound in A *after* the import that leads (through eager edges) back to the importer: loading A first then executes A up to that import, which runs B, which asks the half-built A for `X` before it exists. The proof names the failing load order, the chain, and the lines, and is checked in a test against a real `ImportError`. `evidence.risk.loading` carries the tier as a fact (`none-at-import` / `order-dependent` / `proven-failure`) so a consumer never has to reverse-engineer it from the severity.
+`import-cycle` excludes type-only imports from runtime analysis, then runs
+Tarjan over all runtime edges and over the module-scope, unconditional subset.
+Mixed components are informational with `loading: not-proven`: a deferred
+function can still run during module initialization. Module-scope components
+warn with `potential-at-import`. `findPartialInitCandidate` may attach a
+binding-order hypothesis under `partialInitCandidate`, setting
+`potential-partial-init`; this is not an execution proof and never raises the
+severity to error. Tests compare small authored fixtures with real Python/JS
+loading, including counterexamples to the former safety and failure claims.
+Runtime-risk confidence 0.7 is an ordinal heuristic, not a measured probability.
+
+Python uses an AST visitor to distinguish function bodies from enclosing
+default/decorator expressions, mark TYPE_CHECKING-only and conditional edges,
+and include the package initializers a submodule import loads. TypeScript
+marks explicit type-only edges and deferred import()/require() calls, and
+uses tsconfig options when resolving aliases and inline type specifiers.
+The graph keeps structural dependencies, assigns collision-safe module IDs,
+and stores exact file ownership for the overlay. After schema shape checks,
+semantic validation verifies uniqueness and cross-record references.
 
 ### Hub
 

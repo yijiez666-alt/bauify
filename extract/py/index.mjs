@@ -26,7 +26,7 @@ function runPython(request) {
   const input = JSON.stringify(request);
   const attempts = [];
   for (const [command, args] of CANDIDATES) {
-    const result = spawnSync(command, [...args, SCRIPT], { input, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    const result = spawnSync(command, [...args, SCRIPT], { input, encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' }, maxBuffer: 256 * 1024 * 1024 });
     if (result.error) { attempts.push(`${command}: ${result.error.code || result.error.message}`); continue; }
     if (result.status !== 0) fail('extract/python-failed', 'The Python extractor exited with an error.', {
       subject: { command, script: SCRIPT },
@@ -58,15 +58,16 @@ export function extract(root, config) {
     for (const b of record.symbols || []) symbols.push({ file: record.path, name: b.name, kind: b.kind, line: b.line });
     if (record.error) { parseErrors.push({ path: record.path, message: record.error }); continue; }
     for (const found of record.imports) {
+      const flags = Object.fromEntries(['lazy', 'typeOnly', 'conditional'].filter((key) => found[key]).map((key) => [key, true]));
       if (found.opaque) {
-        imports.push({ from: record.path, specifier: '<computed>', kind: found.kind, line: found.line, resolved: false });
+        imports.push({ from: record.path, specifier: '<computed>', kind: found.kind, line: found.line, resolved: false, ...flags });
         unresolved.opaque += 1;
         continue;
       }
       for (const edge of resolveImport(found, record.path, fileSet)) {
-        const out = { from: record.path, specifier: edge.specifier, kind: found.kind, line: found.line, resolved: false };
+        const out = { from: record.path, specifier: edge.specifier, kind: found.kind, line: found.line, resolved: false, ...flags };
         if (edge.names && edge.names.length) out.names = edge.names;
-        if (found.lazy) out.lazy = true;
+        if (edge.implicit) out.implicit = true;
         if (edge.to) { out.to = edge.to; out.resolved = true; } else unresolved[edge.reason] += 1;
         imports.push(out);
       }
@@ -96,6 +97,26 @@ function compareText(a, b) {
 // names are themselves submodules yields one edge per submodule plus the
 // package edge when any name is an attribute rather than a submodule.
 function resolveImport(found, fromFile, fileSet) {
+  const declared = resolveDeclaredImport(found, fromFile, fileSet);
+  const seen = new Set(declared.filter((e) => e.to).map((e) => e.to));
+  const initializers = [];
+  for (const edge of declared) {
+    if (!edge.to) continue;
+    const dirs = edge.to.split('/').slice(0, -1);
+    for (let i = 1; i <= dirs.length; i += 1) {
+      const dir = dirs.slice(0, i).join('/');
+      const init = `${dir}/__init__.py`;
+      // The importing module's own ancestors are already being initialized.
+      // Re-entering them does not execute their bodies a second time.
+      if (fromFile.startsWith(`${dir}/`) || !fileSet.has(init) || seen.has(init)) continue;
+      seen.add(init);
+      initializers.push({ specifier: edge.specifier, names: ['*'], to: init, implicit: true });
+    }
+  }
+  return [...initializers, ...declared];
+}
+
+function resolveDeclaredImport(found, fromFile, fileSet) {
   const { level, module, names } = found;
   const specifier = `${'.'.repeat(level)}${module}`;
   if (level === 0 && !module) return [];
@@ -111,7 +132,7 @@ function resolveImport(found, fromFile, fileSet) {
   // PEP 420 namespace package: a directory with no __init__.py. It has no file
   // of its own, so only `from ns import submodule` can produce edges.
   if (!moduleTarget) {
-    const nsDir = module ? namespaceDir(module, base, fileSet) : null;
+    const nsDir = module ? namespaceDir(module, base, fileSet) : base;
     if (nsDir !== null && names.length && names[0] !== '*') {
       const edges = [];
       for (const name of names) {

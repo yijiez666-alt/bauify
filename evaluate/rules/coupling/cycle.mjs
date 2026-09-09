@@ -10,15 +10,16 @@ export const severity = 'info';
 export const confidence = 1.0;
 
 // An edge is "lazy-only" when every import behind it sits inside a function
-// body: the modules still depend on each other by design, but nothing runs at
-// import time, so Python will not raise a circular-import error.
+// body. This is lexical evidence only; the function may run at import time.
 const lazyOnly = (e) => (e.kinds.lazy || 0) > 0 && e.kinds.lazy === e.weight;
 
 export function run({ graph }) {
   const ids = graph.modules.map((m) => m.id).sort();
   const sccsOf = (edges) => tarjan(ids, edges);
   const all = sccsOf(graph.edges);
-  const eager = sccsOf(graph.edges.filter((e) => !lazyOnly(e)));
+  const eager = sccsOf(graph.edges.filter((e) => graph.fileModules
+    ? (e.kinds.eager || 0) > 0
+    : !lazyOnly(e) && e.kinds.typeOnly !== e.weight && e.kinds.conditional !== e.weight));
   const eagerKey = new Set(eager.map((scc) => scc.join(' ')));
 
   const labelOf = new Map(graph.modules.map((m) => [m.id, m.label]));
@@ -30,22 +31,21 @@ export function run({ graph }) {
     const set = new Set(scc);
     const internal = graph.edges.filter((e) => set.has(e.from) && set.has(e.to));
     const path = shortestCycle(scc[0], out, set);
-    // Does this exact SCC still exist once lazy-only edges are removed? If not,
-    // the cycle is closed only by function-scope imports: a design cycle that
-    // is safe at import time. Reported as a warning, with the closing imports.
+    // Check this whole component. A smaller module-scope SCC may still be
+    // nested inside it, so a mixed component is never described as safe.
     const eagerSurvives = eagerKey.has(scc.join(' ')) || eager.some((e) => e.length > 1 && e.every((m) => set.has(m)) && e.length === scc.length);
     const lazyEdges = internal.filter(lazyOnly);
-    const kind = eagerSurvives ? 'eager' : 'lazy-closed';
+    const kind = eagerSurvives ? 'eager' : 'mixed';
     return {
       code, dimension, severity, confidence,
       message: eagerSurvives
         ? `${scc.length} modules depend on each other at package level: ${path.map((id) => labelOf.get(id)).join(' → ')} → ${labelOf.get(path[0])}. See coupling/import-cycle for whether any file actually cycles.`
-        : `${scc.length} modules depend on each other at package level, closed only by function-scope (lazy) imports: ${path.map((id) => labelOf.get(id)).join(' → ')} → ${labelOf.get(path[0])}.`,
+        : `${scc.length} modules form a package-level dependency component containing deferred, conditional, or type-only edges: ${path.map((id) => labelOf.get(id)).join(' → ')} → ${labelOf.get(path[0])}. This grouping does not establish initialization behavior; it may also contain module-scope subcycles.`,
       subject: { modules: scc },
       evidence: {
         kind,
         path,
-        edges: internal.map((e) => ({ from: e.from, to: e.to, weight: e.weight, lazy: e.kinds.lazy || 0 })),
+        edges: internal.map((e) => ({ from: e.from, to: e.to, weight: e.weight, lazy: e.kinds.lazy || 0, ...(graph.fileModules ? { deferred: !(e.kinds.eager > 0) } : {}) })),
         closingLazyImports: lazyEdges.flatMap((e) => e.evidence.map((v) => ({ file: v.file, line: v.line, to: v.to }))).slice(0, 8),
         imports: internal.flatMap((e) => e.evidence.slice(0, 2).map((v) => ({ file: v.file, line: v.line, to: v.to, ...(v.lazy ? { lazy: true } : {}) }))).slice(0, 12),
         totalImports: internal.reduce((n, e) => n + e.weight, 0),
