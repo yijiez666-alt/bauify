@@ -1,57 +1,57 @@
-# Bauify 技术指南：代码背后的东西
+# Bauify technical guide: what is behind the code
 
-写给第一次读这个仓库的人。每一节回答四个问题：这是什么、代码里在哪、为什么用它、容易踩的坑。看代码时遇到不认识的东西，回来查这一篇。
+Written for someone reading this repository for the first time. Each section answers four questions: what this is, where it is in the code, why it is used, and where it bites. When you meet something unfamiliar while reading the code, come back here.
 
-阅读顺序建议和代码流水线一致：先看运行环境（Node、ESM），再看契约（JSON Schema），然后按 extract → graphs → bridge 的顺序看每一层用到的技术，最后看测试和跨平台问题。
+The suggested reading order follows the pipeline: the runtime first (Node, ESM), then the contracts (JSON Schema), then the technology behind each stage in the order extract → graphs → evaluate → overlay / bridge, and finally tests and cross-platform issues.
 
 ---
 
-## 1. 运行环境：Node.js 与 ES Module
+## 1. Runtime: Node.js and ES modules
 
-### 这是什么
+### What it is
 
-Bauify 是一个 Node.js 命令行程序。文件后缀 `.mjs` 表示它用的是 **ES Module**（ESM）——JavaScript 的官方模块系统，用 `import` / `export` 语句，而不是老式 CommonJS 的 `require()` / `module.exports`。
+Bauify is a Node.js command-line program. The `.mjs` extension means the files are **ES modules** (ESM), JavaScript's official module system, using `import` / `export` statements rather than CommonJS's `require()` / `module.exports`.
 
 ```js
 // extract/py/index.mjs
-import { spawnSync } from 'node:child_process';   // Node 内置模块，加 node: 前缀
-import { fail } from '../shared/diagnostics.mjs';  // 本仓库文件，必须写扩展名
+import { spawnSync } from 'node:child_process';   // a Node built-in, with the node: prefix
+import { fail } from '../shared/diagnostics.mjs';  // a file in this repository; the extension is mandatory
 export const id = 'py';
 export function extract(root, config) { … }
 ```
 
-### 为什么
+### Why
 
-`package.json` 里 `"type": "module"` 让整个包默认是 ESM。选 ESM 而不是 CommonJS 有两个原因：Archify 也是 ESM，风格一致；ESM 的 `import` 是静态的，本身就是"静态可分析的依赖"——Bauify 分析别人代码时依赖的正是这个性质。
+`"type": "module"` in `package.json` makes the whole package ESM by default. ESM was chosen over CommonJS for two reasons: Archify is ESM too, so the style matches; and an ESM `import` is static, which is exactly the "statically analysable dependency" property Bauify relies on when it analyses other people's code.
 
-### 坑
+### Where it bites
 
-- ESM 的相对导入**必须写扩展名**：`'./files.mjs'` 而不是 `'./files'`。
-- ESM 里没有 `__dirname`。要拿当前文件所在目录，用 `fileURLToPath(import.meta.url)`，代码里 `extract/py/index.mjs` 顶部就是这样定位 `extract.py` 的。
-- `import()` 带括号是**动态导入**，返回 Promise，参数可以是任意表达式。这一点在后面"opaque"一节会再出现。
+- Relative imports in ESM **must include the extension**: `'./files.mjs'`, not `'./files'`.
+- There is no `__dirname` in ESM. To find the directory of the current file use `fileURLToPath(import.meta.url)`; the top of `extract/py/index.mjs` does exactly that to locate `extract.py`.
+- `import()` with parentheses is a **dynamic import**: it returns a Promise and its argument can be any expression. This comes back in the "opaque" section below.
 
 ---
 
-## 2. 契约：JSON Schema 与 ajv
+## 2. Contracts: JSON Schema and ajv
 
-### 这是什么
+### What it is
 
-**JSON Schema** 是用 JSON 描述"一份 JSON 应该长什么样"的标准。Bauify 每一层的产物都有一份 schema：`schemas/raw-facts.schema.json`、`schemas/module-graph.schema.json`。
+**JSON Schema** is a standard for describing, in JSON, what a JSON document should look like. Every stage of Bauify has a schema for its output: `schemas/raw-facts.schema.json`, `schemas/module-graph.schema.json`, `schemas/findings.schema.json`.
 
-**ajv** 是 Node 里最常用的 JSON Schema 校验库。代码在 `extract/shared/schema.mjs`：
+**ajv** is the most widely used JSON Schema validator for Node. The code is in `extract/shared/schema.mjs`:
 
 ```js
-import Ajv2020 from 'ajv/dist/2020.js';           // 用 draft 2020-12 版本
+import Ajv2020 from 'ajv/dist/2020.js';           // the draft 2020-12 flavour
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
-const validate = ajv.compile(schema);              // 把 schema 编译成校验函数
-if (!validate(data)) console.log(validate.errors); // 每条错误带 instancePath 和 message
+const validate = ajv.compile(schema);              // compile the schema into a validation function
+if (!validate(data)) console.log(validate.errors); // each error carries instancePath and message
 ```
 
-### 为什么
+### Why
 
-契约先于代码。schema 写好之后，extract 的输出**写盘前**先过校验，graphs 的输入**读进来后**也先过校验。任何一层产出不合规的 JSON 会立刻报 `extract/schema-invalid` 而不是让下一层莫名其妙崩掉。
+The contract comes before the code. Once a schema is written, extract's output is validated **before it is written to disk**, and graphs' input is validated **as soon as it is read**. A stage that emits non-conforming JSON fails immediately with `extract/schema-invalid` instead of making the next stage crash mysteriously.
 
-schema 里两个值得看的写法：
+Two constructs in the schemas worth a look:
 
 ```json
 "if":   { "properties": { "resolved": { "const": true } } },
@@ -59,149 +59,152 @@ schema 里两个值得看的写法：
 "else": { "not": { "required": ["to"] } }
 ```
 
-这是 **条件约束**：`resolved` 为 true 时必须有 `to`，为 false 时不能有 `to`。之前这个不变量只写在注释里，CodeRabbit 指出"注释不是约束"，于是改成了 schema 能强制的形式。
+This is a **conditional constraint**: when `resolved` is true, `to` must be present; when false, it must not be. The invariant used to live in a comment; a reviewer pointed out that a comment is not a constraint, so it became something the schema enforces.
 
-`"additionalProperties": false` 表示对象里不允许出现 schema 没列出的字段——防止某个适配器偷偷塞私有字段进公共契约。
+`"additionalProperties": false` forbids fields the schema does not list, so an adapter cannot quietly smuggle private fields into the public contract.
 
-### 坑
+### Where it bites
 
-- draft 2020-12 要从 `ajv/dist/2020.js` 引入，默认的 `ajv` 导出只认 draft-07，会报 "no schema with key or ref"。
-- ajv 的 `strict: true` 会拒绝 `then` 里 `required` 一个上层定义的属性（`strictRequired`）。我们把 `strictRequired` 关掉、其余严格检查保留。
+- Draft 2020-12 must be imported from `ajv/dist/2020.js`; the default `ajv` export only knows draft-07 and reports "no schema with key or ref".
+- ajv's `strict: true` rejects a `then` that `required`s a property defined one level up (`strictRequired`). We switch `strictRequired` off and keep every other strict check.
 
 ---
 
-## 3. extract/ts：TypeScript Compiler API
+## 3. extract/ts: the TypeScript Compiler API
 
-### 这是什么
+### What it is
 
-TypeScript 除了是一门语言，它的编译器 `typescript` 包还暴露了一整套 API，可以把源码解析成 **AST**（抽象语法树）并做类型分析。它同样能解析纯 JavaScript（`allowJs: true`），所以 Bauify 用它统一处理 JS 和 TS。
+TypeScript is a language, but the `typescript` package also exposes the compiler as an API that parses source into an **AST** (abstract syntax tree) and performs type analysis. It parses plain JavaScript too (`allowJs: true`), so Bauify uses it for both JS and TS.
 
-### AST 是什么
+### What an AST is
 
-AST 是源码的树形表示。`import { a } from './x.mjs'` 这一行会变成一个 `ImportDeclaration` 节点，下面挂着 `ImportClause`（导入了什么）和 `StringLiteral`（从哪导入）。分析代码就是在树上找特定类型的节点。
+An AST is a tree representation of source code. The line `import { a } from './x.mjs'` becomes an `ImportDeclaration` node with an `ImportClause` (what is imported) and a `StringLiteral` (where from) underneath. Analysing code means finding nodes of particular kinds in the tree.
 
-代码里的遍历（`extract/ts/index.mjs` 的 `collectImports`）：
+The traversal in `extract/ts/index.mjs` (`collectImports`):
 
 ```js
 const visit = (node) => {
   if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
     found.push({ specifier: node.moduleSpecifier.text, kind: 'static', line: lineOf(source, node), … });
   } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-    // import(...) 动态导入
+    // import(...) — dynamic import
   }
-  ts.forEachChild(node, visit);   // 递归所有子节点
+  ts.forEachChild(node, visit);   // recurse into every child
 };
 visit(sourceFile);
 ```
 
-`ts.isXxx(node)` 系列函数是类型守卫，用来判断节点种类；`ts.forEachChild` 深度优先遍历。
+The `ts.isXxx(node)` functions are type guards that test a node's kind; `ts.forEachChild` walks depth-first.
 
-### Program 与 type checker
+### Program and type checker
 
-一开始 Bauify 只用 `ts.createSourceFile` 单文件解析。上游作者把它改成了 `ts.createProgram(files, { noResolve: true, noLib: true })` 再拿 `program.getTypeChecker()`。原因是一个真实 bug：
+At first Bauify parsed one file at a time with `ts.createSourceFile`. The upstream reviewer changed it to `ts.createProgram(files, { noResolve: true, noLib: true })` plus `program.getTypeChecker()` because of a real bug:
 
 ```js
 function local() { require('./dep'); var require = (s) => s; }
 ```
 
-这里的 `require` 是局部变量，不是 CommonJS 的加载器。单看语法分不出来；type checker 的 `getSymbolAtLocation(identifier)` 能告诉你这个标识符绑定到哪个声明——没有声明就是全局 `require`，有声明就是局部变量。`noResolve` 和 `noLib` 让 Program 只做词法绑定、不去解析模块和标准库，所以速度可以接受。
+Here `require` is a local variable, not the CommonJS loader. Syntax alone cannot tell; the type checker's `getSymbolAtLocation(identifier)` says which declaration an identifier is bound to — no declaration means the global `require`, a declaration means a local. `noResolve` and `noLib` make the Program do lexical binding only, without resolving modules or the standard library, so the cost stays acceptable.
 
-### 模块解析
+### Module resolution
 
-`ts.resolveModuleName(specifier, containingFile, options, ts.sys)` 按 Node 的规则把 `'../shared/cli.mjs'` 解析成绝对路径。Bauify 拿到路径后判断它是否在分析根目录内、是否在文件集合里，据此归到 resolved / outside / unknown。
+`ts.resolveModuleName(specifier, containingFile, options, ts.sys)` resolves `'../shared/cli.mjs'` to an absolute path by Node's rules. Bauify then checks whether that path is inside the analyzed root and in the file set, and classifies the import as resolved / outside / unknown.
 
-### 为什么不用 dependency-cruiser 或 babel
+### Why not dependency-cruiser or Babel
 
-它们只给 import 边。M2 要做符号图和调用图时需要引用和调用信息，TS API 一次遍历都能拿到，不用再引第二个解析器。
+They only give import edges. The symbol and call graphs in M2 need references and calls, which the TS API yields in the same traversal, so there is no need for a second parser.
 
-### 坑
+### Where it bites
 
-- `node.getStart(source)` 需要传 sourceFile，否则在 Program 模式下拿不到位置。
-- 引擎默认排序 `localeCompare` 依赖操作系统 locale，不同机器结果不同——见第 9 节。
+- `node.getStart(source)` needs the sourceFile argument; without it, positions are wrong in Program mode.
+- Sorting with `localeCompare` depends on the operating system locale and differs between machines — see section 9.
 
 ---
 
-## 4. extract/py：Python 标准库 `ast` + 子进程
+## 4. extract/py: Python's standard-library `ast` in a subprocess
 
-### 这是什么
+### What it is
 
-Python 自带 `ast` 模块，功能和 TS 的解析器类似：`ast.parse(source)` 得到树，`ast.walk(tree)` 遍历。`extract/py/extract.py` 只用标准库，不需要 pip 安装任何东西。
+Python ships an `ast` module that does what the TS parser does: `ast.parse(source)` gives the tree, `ast.walk(tree)` traverses it. `extract/py/extract.py` uses only the standard library; nothing needs to be pip-installed.
 
 ```python
 for node in ast.walk(tree):
     if isinstance(node, ast.Import):          # import a.b as c
         …
     elif isinstance(node, ast.ImportFrom):    # from ..pkg import x, y
-        level = node.level                    # 前导点的个数：0 绝对，1 当前包，2 上一级
-        module = node.module or ""            # from . import x 时 module 是 None
+        level = node.level                    # number of leading dots: 0 absolute, 1 this package, 2 the parent
+        module = node.module or ""            # None for `from . import x`
 ```
 
-### 子进程与进程间通信
+The script also records two things the rules need later: whether an import sits inside a function body (`lazy`, decided by the line ranges of every `def`), and every name bound at module scope with the line where it becomes bound (`symbols`: functions, classes, assignments, import aliases; it walks into top-level `if` / `try` / `with` blocks but not into function or class bodies).
 
-Node 不能直接跑 Python 代码，所以 `extract/py/index.mjs` 用 `child_process.spawnSync` 启动一个 Python 进程，把文件列表以 JSON 写到它的 **stdin**，从它的 **stdout** 读回 JSON：
+### Subprocess and inter-process communication
+
+Node cannot run Python code directly, so `extract/py/index.mjs` starts a Python process with `child_process.spawnSync`, writes the file list as JSON to its **stdin**, and reads JSON back from its **stdout**:
 
 ```js
 const result = spawnSync('python3', [SCRIPT], { input: JSON.stringify(request), encoding: 'utf8' });
 const output = JSON.parse(result.stdout);
 ```
 
-`spawnSync` 是同步的：Node 会等 Python 跑完再继续。对命令行工具这样最简单，不用处理并发。
+`spawnSync` is synchronous: Node waits for Python to finish. For a command-line tool that is the simplest option; no concurrency to manage.
 
-解释器名字在 Windows 上通常是 `python`，Linux/macOS 上是 `python3`，Windows 还有 `py -3` 启动器。代码按顺序试三个，都失败才报 `extract/python-unavailable`，也可以用环境变量 `BAUIFY_PYTHON` 指定。
+The interpreter is usually `python` on Windows and `python3` on Linux / macOS, and Windows also has the `py -3` launcher. The code tries the three in order and reports `extract/python-unavailable` only when all fail; `BAUIFY_PYTHON` names an interpreter explicitly.
 
-### 为什么解析在 Node 侧做
+### Why resolution happens on the Node side
 
-Python 脚本只输出"原始 import 语句"，把 `from utils import logger` 解析成 `utils/logger.py` 这一步在 Node 里做。这样 external / outside / unknown / opaque 四类的定义只存在一份，两种语言不会各自解释。
+The Python script only emits raw import statements; turning `from utils import logger` into `utils/logger.py` happens in Node. That way the definitions of external / outside / unknown / opaque exist once, and the two languages cannot drift apart.
 
-### Python 导入语义（新手最容易糊的部分）
+### Python import semantics (the part newcomers find hardest)
 
-- **包**：有 `__init__.py` 的目录。`import pkg` 实际加载的是 `pkg/__init__.py`。
-- **相对导入**：`from .a import x` 里的点表示"相对当前文件所在的包"。`level=1` 是同一目录，`level=2` 是上一级。越出分析根目录记为 `outside`。
-- **`from pkg import name`** 有两种可能：`name` 是 `pkg/name.py`（子模块），或者是 `pkg/__init__.py` 里定义的变量（属性）。代码先试子模块，找不到才算属性、指向 `__init__.py`。
-- **PEP 420 命名空间包**：Python 3.3 起，**没有** `__init__.py` 的目录也能当包用。ai-voice 的 `utils/`、`asr/` 都是这种。它没有自己的文件，所以只有 `from ns import submodule` 能产生边；`from ns import 属性` 记 unknown。这是跑真实仓库时发现的，第一版有 56 条解析失败。
-- **绝对导入的搜索路径**：真实的 Python 按 `sys.path` 找，Bauify 无法知道用户的运行环境，就按最常见的约定：先仓库根目录，再 `src/`。
-- **动态导入**：`importlib.import_module("a.b")` 参数是字面量就能解析；是变量就记 `opaque`。
+- **Package**: a directory with `__init__.py`. `import pkg` actually loads `pkg/__init__.py`.
+- **Relative import**: the dots in `from .a import x` mean "relative to the package this file is in". `level=1` is the same directory, `level=2` the parent. Leaving the analyzed root is recorded as `outside`.
+- **`from pkg import name`** has two readings: `name` is `pkg/name.py` (a submodule) or a variable defined in `pkg/__init__.py` (an attribute). The code tries the submodule first and falls back to the attribute, pointing at `__init__.py`.
+- **PEP 420 namespace packages**: since Python 3.3 a directory **without** `__init__.py` can be a package. ai-voice's `utils/` and `asr/` are of this kind. It has no file of its own, so only `from ns import submodule` yields an edge; `from ns import attribute` is `unknown`. This was discovered on a real repository: the first version had 56 resolution failures.
+- **Search path for absolute imports**: real Python searches `sys.path`; Bauify cannot know the user's runtime, so it follows the common convention: the repository root first, then `src/`.
+- **Dynamic imports**: `importlib.import_module("a.b")` resolves when the argument is a literal; a variable is recorded as `opaque`.
+- **Partial initialisation**: when A imports B and B imports A, Python does not fail by itself. The module being loaded is already in `sys.modules`, so the second `import a` simply returns the half-built module. It only fails when B does `from a import X` and A has not yet executed the line that binds `X`. This distinction is what the `import-cycle` rule's tiers are built on (section 8).
 
 ---
 
-## 5. 四类"解析不到"：为什么要分开数
+## 5. The four kinds of "unresolved": why they are counted separately
 
-`raw-facts.json` 的 `unresolved` 有四个计数器，都是 `required`：
+`raw-facts.json` has four counters under `unresolved`, all `required`:
 
-| 类别 | 含义 | 期望 |
+| category | meaning | expectation |
 |---|---|---|
-| `external` | 裸模块名或 `node:` 前缀：第三方库、标准库 | 多是正常的 |
-| `outside` | 解析到了，但文件在分析根目录之外 | 通常是测试引用了上级目录的脚本 |
-| `unknown` | 像路径，但找不到文件 | **应该是 0**，非 0 说明解析规则有漏洞或代码有坏引用 |
-| `opaque` | `import()` / `require()` / `import_module()` 的参数不是字符串字面量 | 静态分析的盲区，必须可见 |
+| `external` | a bare module name or `node:` prefix: third-party or standard library | mostly normal |
+| `outside` | resolved, but the file is outside the analyzed root | usually a test referencing a script one level up |
+| `unknown` | looks like a path but no file is there | **should be 0**; non-zero means a resolution gap or a broken reference in the code |
+| `opaque` | the argument of `import()` / `require()` / `import_module()` is not a string literal | the blind spot of static analysis; it must stay visible |
 
-`opaque` 是关键的一类。Archify 的 `bin/archify.mjs` 用 `spawnSync(process.execPath, [渲染器路径])` 启动子进程、用 `import(pathToFileURL(path.join(...)))` 加载 delta 模块——两种都是运行时才知道目标的调用。图上 `bin` 到各渲染器**没有边**，这是事实；但如果只是悄悄没有边，读图的人会以为 bin 不依赖渲染器。计数把"这里有 3 处看不见的动态加载"说出来，这就是 ARCHITECTURE.md 里"漏报可见"的意思。
+`opaque` is the important one. Archify's `bin/archify.mjs` starts renderers with `spawnSync(process.execPath, [rendererPath])` and loads the delta module with `import(pathToFileURL(path.join(...)))` — both are calls whose target is only known at run time. The diagram has **no edge** from `bin` to the renderers, and that is a fact; but if the edge were merely missing, a reader would assume `bin` does not depend on the renderers. The count says "there are 3 dynamic loads here that cannot be seen", which is what ARCHITECTURE.md means by "omissions stay visible".
 
 ---
 
-## 6. 小工具：glob 匹配、文件角色、Git
+## 6. Small utilities: glob matching, file roles, Git
 
-### glob → 正则
+### glob → regular expression
 
-`config/defaults.json` 里的 `**/test/**`、`**/*.{js,mjs}` 是 **glob** 模式，一种描述路径的简写。Node 18 没有稳定的内置 glob，`extract/shared/glob.mjs` 手写了一个转换器，把 glob 翻译成正则表达式：`**` → 任意多级目录，`*` → 一段内任意字符，`{a,b}` → 二选一。上游作者补了一个边界：`{` 没有闭合时原来会死循环，现在报 `cli/config-invalid`。
+`**/test/**` and `**/*.{js,mjs}` in `config/defaults.json` are **glob** patterns, a shorthand for paths. Node 18 has no stable built-in glob, so `extract/shared/glob.mjs` hand-writes a translator from glob to regular expression: `**` → any number of directory levels, `*` → any characters within one segment, `{a,b}` → either. A reviewer added one edge case: an unclosed `{` used to loop forever and now reports `cli/config-invalid`.
 
-### 文件角色
+### File roles
 
-每个文件被标为 `source` / `test` / `generated`。规则是 glob，优先级 **test > generated > source**：`test/generated-artifact-xml.test.mjs` 同时匹配两条，它是测试。这个优先级是被测试抓出来后定的。
+Every file is tagged `source` / `test` / `generated`. The rules are globs, with precedence **test > generated > source**: `test/generated-artifact-xml.test.mjs` matches two of them and is a test. The precedence was decided after a test caught the ambiguity.
 
 ### Git
 
-`extract/shared/git.mjs` 用 `spawnSync('git', [...])` 调三条**只读**命令：`rev-parse --show-toplevel`（仓库根）、`rev-parse HEAD`（当前 commit 的 40 位 sha）、`remote get-url origin`（远端地址）。这些是 Git 的"plumbing"命令，输出稳定、适合程序解析。没有 Git 时全部返回 null，分析照常进行，只是后面走不了证据模式。
+`extract/shared/git.mjs` runs three **read-only** commands through `spawnSync('git', [...])`: `rev-parse --show-toplevel` (repository root), `rev-parse HEAD` (the 40-hex sha of the current commit), and `remote get-url origin` (the remote URL). These are Git's "plumbing" commands with stable output made for programs. Without Git everything returns null and analysis proceeds; evidence mode is simply unavailable.
 
 ---
 
-## 7. graphs/module：图的基本概念与度量
+## 7. graphs/module: graph basics and metrics
 
-### 从文件图到模块图
+### From a file graph to a module graph
 
-raw-facts 里的边是文件到文件。`graphs/module.mjs` 把每个文件映射到一个模块（按配置分组 / 包边界 / 目录深度），再把文件边**合并**成模块边：同一对模块之间的多条文件边合成一条，`weight` 是条数，`kinds` 按 static / dynamic 分计，`evidence` 保留最多 5 条 file:line。
+Edges in raw-facts go from file to file. `graphs/module.mjs` maps every file to a module (by configured groups, package boundary, or directory depth; root-level files become modules of their own) and **merges** file edges into module edges: several file edges between the same pair of modules become one, `weight` is the count, `kinds` counts static versus dynamic, and `evidence` keeps up to five file:line entries.
 
-用 `Map` 做去重合并是 JS 里的惯用写法：
+Deduplicating with a `Map` is the idiomatic JS pattern:
 
 ```js
 const key = `${from} ${to}`;
@@ -209,76 +212,121 @@ if (!edgeMap.has(key)) edgeMap.set(key, { from, to, weight: 0, … });
 edgeMap.get(key).weight += 1;
 ```
 
-### fan-in、fan-out、instability
+### fan-in, fan-out, instability
 
-- **fan-in**：有多少个别的模块依赖我（入边数）。高 = 被广泛使用，改动要小心。
-- **fan-out**：我依赖多少个别的模块（出边数）。高 = 脆弱，别人一变我就要跟着变。
-- **instability** I = fanOut / (fanIn + fanOut)。0 表示纯 sink（只被依赖），1 表示纯 source（只依赖别人）。这是 Robert C. Martin 在《敏捷软件开发》里提出的度量；健康的依赖方向是"不稳定的依赖稳定的"。
+- **fan-in**: how many other modules depend on me (incoming edges). High = widely used, change with care.
+- **fan-out**: how many other modules I depend on (outgoing edges). High = fragile, I follow whenever they change.
+- **instability** I = fanOut / (fanIn + fanOut). 0 is a pure sink (only depended on), 1 a pure source (only depends). The metric is Robert C. Martin's, from *Agile Software Development*; the healthy direction is "unstable depends on stable".
 
-没有任何边时 I 是 `null` 而不是 0——没有数据就不假装有。
+With no edges at all I is `null`, not 0: no data is not pretended into a number.
 
-### 为什么剔除测试和生成文件
+### Why test and generated files are excluded
 
-测试文件几乎 import 一切，留着会让每个模块的 fan-in 都很高，度量失去意义。生成文件（`generated-validators.mjs`）是构建产物，不反映设计。剔除但**计数**（`excluded.files`），Archify 图的卡片会写"102 个文件未画"。
-
----
-
-## 8. bridge/to-archify：图算法与布局
-
-这是仓库里算法最密集的文件。逐个说。
-
-### 折叠到 12 个节点
-
-Archify 建议一张图不超过 12 个主节点。`foldToBudget` 把**整组兄弟**折进父目录（最深的先）：`tools/dram`、`tools/finance`、… 全部并入 `tools`。第一版是"折到够 12 个就停"，结果 `tools/*` 折了一半留一半，测试抓到后改成整组折叠。折叠时边要**重映射**（`remap`）：指向被折叠模块的边改指父模块，父子之间的边变成自环要删掉，然后重新计算 fan-in/out。
-
-### DFS 去环与分层
-
-真实依赖图常有环（ai-voice 里 `root ↔ asr`）。要排成上下分层的图必须先变成 DAG（有向无环图）。做法是**深度优先搜索**（DFS）：遍历时给节点标记"正在访问"；如果一条边指向正在访问中的节点，它就是**回边**，构成环，分层时忽略它（`layerModules` 里 `state.get(next) === 1` 那行）。
-
-分层用**最长路径**：先做拓扑排序，再按顺序把每个节点的层数更新为"所有前驱层数 + 1 的最大值"。source（没有入边）在第 0 层，最深的 sink 在最下面。
-
-### 拓扑排序与 Kahn 算法
-
-`orderLanes` 里用的是 **Kahn 算法**：维护"还没放的集合"，每轮取出所有约束已经满足的节点，按稳定的规则选一个放下。约束来自"哪条边必须在哪条边上方"（见下）。如果约束成环（嵌套区间），退回到按跨度排序——这就是不可避免的交叉。
-
-### 为什么每个模块独占一列
-
-Archify 对"边穿过无关节点"是硬错误。如果每个模块独占一列，一条竖直走线永远只会经过自己那一列，而那一列里没有别的节点。代价是图变宽；这是已知短板。
-
-列的顺序按 instability 升序：sink 在左、source 在右，这样大部分 lane 都从右往左指向 sink，源节点的竖直短线很少落在别人的横线区间里。
-
-### 显式路由：via 与 lane
-
-Archify 没有自动布局，只有 `grid` 模式和显式路由点 `via`。每条边走三段：从源底部竖直下到一条 **lane**（该行下方 gap 里的一条水平线，每条边一条，24px 一档），水平走到目标所在列，再竖直下到目标顶部。反向边（指向上方的回边）从顶部走上方的 gap。标签用 `labelAt` 钉在 lane 上靠近源的位置，那里不会有别的列的竖线。
-
-同一 gap 里多条 lane 的上下顺序按两条规则排：一条边的**源**落在另一条边的水平区间内 → 它必须在上方；一条边的**目标**落在另一条区间内 → 它必须在下方。两条都满足不了（区间嵌套）就会交叉。
-
-### standard 与 showcase
-
-Archify 的 `showcase` 档位要求零交叉。真实依赖图基本是非平面图（无论怎么画都有交叉），所以 Bauify 默认声明 `standard`：交叉是 warning，图正常交付，证据照样核对。
-
-### 证据模式
-
-`meta.repository` 和每个节点的 `sources` 只在两个条件同时满足时写：revision 是 40 位 sha，origin 是 github.com（ssh 形式 `git@github.com:a/b.git` 会归一成 `https://github.com/a/b`）。写了之后 `archify deliver --repo-root` 会用 git 逐条核对这些路径在那个 commit 真实存在——所以 Bauify 不是自己声称有证据，而是把可核对的线索交给 Archify。
+Test files import almost everything; keeping them would push every module's fan-in up and make the metric meaningless. Generated files (`generated-validators.mjs`) are build products and reflect no design. They are excluded but **counted** (`excluded.files`), so the diagram's card can say "102 files not drawn".
 
 ---
 
-## 9. 确定性：为什么这么执着于"字节相同"
+## 8. evaluate: rules, Tarjan, and the partial-initialisation proof
 
-"同一输入跑两次，输出字节级相同"是 Bauify 的硬约束，因为它让 `diff` 两次分析结果等价于 `diff` 代码结构。为此代码里处处注意：
+### The rule engine
 
-- 所有数组在输出前按稳定键排序（文件按路径，边按 from/line/specifier）。
-- 不写时间戳，不写绝对路径（`repository.root` 是相对 Git 根的路径）。
-- **不用 `localeCompare`**。它按操作系统的语言设置排序，`ä` 和 `z` 在 `C` locale 和 `sv_SE` locale 下顺序不同。改用 `a < b ? -1 : a > b ? 1 : 0` 的字节序比较。这是 CodeRabbit 发现、上游作者修的。
-- `JSON.stringify(value, null, 2)` 输出顺序就是对象属性的插入顺序，所以构造对象时字段顺序也是固定的。
+`evaluate/index.mjs` loads each rule module, runs it with the module graph, the raw facts, and the configuration, and gives every finding a stable id (`COUP-0001`) after a deterministic sort. Rules do not read each other's output. A suppressed rule is counted in `summary.suppressed` rather than silently skipped.
 
-有一个测试专门跑两次比较字节。
+### Strongly connected components
+
+A cycle in a directed graph is a set of nodes that can all reach each other. **Tarjan's algorithm** finds every such set (a strongly connected component, SCC) in one depth-first pass, keeping a stack and, for each node, the lowest index reachable from it. Both `coupling/cycle` (over modules) and `coupling/import-cycle` (over files) use it; an SCC of size one is not a cycle. A second BFS then picks the **shortest** cycle inside the SCC so the message can quote one concrete loop rather than the whole component.
+
+### Why the tiers
+
+`import-cycle` runs Tarjan twice: once over all resolved file imports, once over only the module-scope ones. An SCC that exists in the first pass but not the second is closed by lazy imports and is reported as **info** — nothing happens at import time. An SCC that survives the second pass is an eager cycle and is a **warning**, because Python generally tolerates it (section 4). It becomes an **error** only when `provePartialInit` finds a `from A import X` whose `X` is bound in A *after* the import that leads (through eager edges) back to the importer: loading A first then executes A up to that import, which runs B, which asks the half-built A for `X` before it exists. The proof names the failing load order, the chain, and the lines, and is checked in a test against a real `ImportError`. `evidence.risk.loading` carries the tier as a fact (`none-at-import` / `order-dependent` / `proven-failure`) so a consumer never has to reverse-engineer it from the severity.
+
+### Hub
+
+`coupling/hub` is arithmetic on the module graph: fan-in and fan-out both at or above the configured thresholds. The thresholds are echoed in the finding so the reader can see what was compared.
 
 ---
 
-## 10. 失败即结构化诊断
+## 9. overlay/inject: layering onto Archify's HTML
 
-Bauify 从不把 Node 的堆栈打给用户。任何失败都是一个固定形状的对象（`extract/shared/diagnostics.mjs`）：
+### What it does
+
+`buildOverlay` takes the delivered HTML as a string, computes one record per component (modules, files, edges, indicators, findings), and inserts three blocks before `</body>`: a `<script type="application/json">` with the data, a `<style>`, and a `<script>` with the page logic. Nothing in the original markup is edited, and the result is written to a new file. Everything the page needs is embedded — it works from a file:// URL with no network.
+
+### Mapping components to modules
+
+A component's `sources` in the IR name files; the deepest module whose path contains that file claims the component, and descendants follow their parent unless another component claims them. `--map` replaces this with an explicit `{ componentId: [moduleId] }` table. A module no component claims is listed, not dropped.
+
+### Indicators and the halo
+
+For each component the indicators are computed on the Node side from the findings that touch it: the cycle indicator looks at `import-cycle` findings on its files and `cycle` findings on its modules and takes the worst tier; the hub indicator looks for `hub` findings on its modules; instability is fan-out over fan-in plus fan-out summed over its modules. The component's colour is the worst indicator. On the page, `drawLayer` draws one rounded `rect` per component in an SVG group appended to Archify's SVG, sized from `getBBox()` of the component's `g[data-node-id]`, pushed 10 px outside the box and blurred with a CSS filter so it reads as a halo rather than a second border; red animates.
+
+### Diagrams and source excerpts
+
+The second panel's diagrams are plain SVG strings built in the page: the cycle ring places the files of the shortest cycle on an ellipse and draws clipped arrows between them (dashed when the closing import is lazy); the hub star puts dependents on the left and dependencies on the right; instability is two bars and a marker on a 0–1 scale. With `--source`, `collectSnippets` reads every file a finding cites from the analyzed tree and embeds its full text, so the third panel can show the cited line inside the whole file.
+
+### Where it bites
+
+- The overlay script lives inside a JavaScript template literal in `inject.mjs`, so a backslash in a regular expression there has to be doubled (`\\.git$`) or the template literal eats it before the browser sees it.
+- Archify's viewer defines the CSS variables the panels use (`--panel`, `--bg`, `--text`, …). A variable that does not exist (`--panel-bg` was one such guess) silently falls back to nothing and makes text invisible in one theme.
+
+---
+
+## 10. bridge/to-archify: graph algorithms and layout
+
+This is the most algorithm-dense file in the repository, though it is no longer the main path (see ARCHITECTURE.md §2.5).
+
+### Folding to 12 nodes
+
+Archify recommends at most 12 main nodes per diagram. `foldToBudget` folds **whole sibling groups** into their parent directory, deepest first: `tools/dram`, `tools/finance`, … all merge into `tools`. The first version stopped as soon as the count reached 12, which left half of `tools/*` folded and half not; a test caught it, and folding became all-or-nothing per group. Folding **remaps** edges: an edge into a folded module now points at the parent, a parent–child edge becomes a self-loop and is removed, and fan-in / fan-out are recomputed.
+
+### Breaking cycles with DFS, then layering
+
+Real dependency graphs often have cycles. To lay nodes out in layers the graph must first become a DAG (directed acyclic graph). **Depth-first search** does it: nodes are marked "in progress" while being visited; an edge that points at an in-progress node is a **back edge**, part of a cycle, and is ignored for layering (`state.get(next) === 1` in `layerModules`).
+
+Layering uses **longest path**: topologically sort, then set each node's layer to the maximum of its predecessors' layers plus one. Sources (no incoming edges) sit in layer 0; the deepest sink is at the bottom.
+
+### Topological order and Kahn's algorithm
+
+`orderLanes` uses **Kahn's algorithm**: keep the set of unplaced items, take every item whose constraints are satisfied each round, and pick one by a stable rule. The constraints say which edge must sit above which (below). When constraints form a cycle (nested spans), it falls back to sorting by span — the unavoidable crossing.
+
+### Why one module per column
+
+Archify treats "an edge passes through an unrelated node" as a hard error. With one module per column, a vertical segment only ever crosses its own column, which contains no other node. The cost is width; that is a known limitation.
+
+Columns are ordered by instability ascending: sinks on the left, sources on the right, so most lanes run right-to-left towards sinks and a source's short vertical rarely lands inside someone else's horizontal span.
+
+### Explicit routing: `via` and lanes
+
+Archify has no automatic layout, only `grid` mode and explicit `via` waypoints. Every edge takes three segments: straight down from the source's bottom to a **lane** (a horizontal line in the gap below the row, one per edge, 24 px apart), horizontally to the target's column, and down to the target's top. Back edges (pointing upwards) leave from the top through the gap above. The label is pinned with `labelAt` on the lane near the source, where no other column's vertical can be.
+
+Lanes within one gap are ordered by two rules: if an edge's **source** falls inside another edge's horizontal span, it must be above; if its **target** falls inside another's span, it must be below. When neither can be satisfied (nested spans) they cross.
+
+### standard versus showcase
+
+Archify's `showcase` profile demands zero crossings. Real dependency graphs are mostly non-planar (they cross however they are drawn), so Bauify declares `standard` by default: crossings are warnings, the diagram is delivered, and evidence is still verified.
+
+### Evidence mode
+
+`meta.repository` and each node's `sources` are written only when both conditions hold: the revision is a 40-hex sha and the origin is github.com (the ssh form `git@github.com:a/b.git` is normalised to `https://github.com/a/b`). Once written, `archify deliver --repo-root` uses git to check that every path exists at that commit — so Bauify does not claim evidence itself; it hands Archify verifiable leads.
+
+---
+
+## 11. Determinism: why "byte-identical" matters so much
+
+"Run twice on the same input, get byte-identical output" is a hard constraint, because it makes `diff` of two analyses equivalent to `diff` of the code structure. The code is careful everywhere:
+
+- Every array is sorted by a stable key before output (files by path, edges by from / line / specifier).
+- No timestamps, no absolute paths (`repository.root` is relative to the Git root).
+- **No `localeCompare`.** It sorts by the operating system's language setting; `ä` and `z` order differently under the `C` locale and `sv_SE`. Byte-order comparison `a < b ? -1 : a > b ? 1 : 0` is used instead. A reviewer found this and the fix followed.
+- `JSON.stringify(value, null, 2)` emits properties in insertion order, so objects are constructed with a fixed field order.
+
+One test runs the pipeline twice and compares bytes.
+
+---
+
+## 12. Failure is a structured diagnostic
+
+Bauify never prints a Node stack trace to the user. Every failure is an object of a fixed shape (`extract/shared/diagnostics.mjs`):
 
 ```json
 { "code": "extract/adapter-ambiguous", "severity": "error",
@@ -287,74 +335,83 @@ Bauify 从不把 Node 的堆栈打给用户。任何失败都是一个固定形�
   "supportedFixes": ["pass --language ts", "pass --language py"] }
 ```
 
-实现方式：`fail(code, message, details)` 抛一个自定义的 `DiagnosticError`；`bin/analyze.mjs` 最外层 `try/catch` 接住它，`--json` 模式输出 `{ status: "failed", diagnostics: [...] }`，人类模式打印 `code: message` 和修复建议，进程退出码 1。不是 `DiagnosticError` 的意外错误也走同一条路，code 是 `internal/unclassified`——明确说"没分类"，不编造修复建议。
+Implementation: `fail(code, message, details)` throws a custom `DiagnosticError`; the outermost `try/catch` in `bin/analyze.mjs` catches it, `--json` mode prints `{ status: "failed", diagnostics: [...] }`, human mode prints `code: message` and the fixes, and the process exits with 1. An unexpected error that is not a `DiagnosticError` takes the same path with code `internal/unclassified` — it says "unclassified" rather than inventing a fix.
 
-这个形状和 Archify 的 diagnostic 契约一模一样，所以将来 findings 可以直接挂进 Archify 的节点卡片。
+The shape is identical to Archify's diagnostic contract, which is why findings could attach to Archify node cards later.
 
 ---
 
-## 11. 测试：node:test、fixture、自举
+## 13. Tests: node:test, fixtures, self-analysis
 
 ### node:test
 
-Node 18 起内置测试框架，不用装 jest。`node --test test/*.test.mjs` 跑所有文件；每个 `test('名字', fn)` 里用 `node:assert/strict` 断言。`{ skip: '原因' }` 可以跳过而不是失败——没有 Archify checkout 时相关测试就是这样跳过的。
+Node 18 ships a test runner, so there is no jest to install. `node --test test/*.test.mjs` runs every file; each `test('name', fn)` asserts with `node:assert/strict`. `{ skip: 'reason' }` skips instead of failing — that is how the Archify-dependent tests behave when no checkout is present.
 
-### 合成 fixture
+### Synthetic fixtures
 
-`test/fixtures/ts-basic/` 和 `py-basic/` 是手工写的迷你仓库，每个文件只有几行，专门覆盖一种情况（相对导入、命名空间包、语法错误、计算路径的动态导入……）。旁边的 `expected.json` 是**先手推、再跑程序核对**得到的预期输出。测试就是 `assert.deepEqual(实际, 预期)`。这类测试的价值在于：任何改动让某条边变了，你会立刻知道是哪个文件哪一行。
+`test/fixtures/ts-basic/` and `py-basic/` are hand-written miniature repositories; each file is a few lines long and covers one case (relative imports, namespace packages, a syntax error, a dynamic import with a computed path, …). The `expected.json` next to them was **derived by hand first, then confirmed by running the program**. The tests are `assert.deepEqual(actual, expected)`. Their value: when a change alters one edge, you know immediately which file and line.
 
-### 回归测试
+### Regression tests
 
-`test/extract-regressions.test.mjs` 每个测试对应一个被 review 抓出的 bug：locale 排序、`..generated/` 误判、glob 死循环、局部 `require`。改坏了会立刻复现。
+Each test in `test/extract-regressions.test.mjs` corresponds to a bug a review caught: locale sorting, the `..generated/` misclassification, the glob infinite loop, the local `require`. Breaking one of them again reproduces instantly.
 
-### 自举
+### Rule tests
 
-分析 Archify 自己的 `archify/` 包，断言 `bin → renderers/* → renderers/shared` 三层、`shared` fan-out 为 0、bin 到渲染器没有静态边但 `opaque ≥ 1`，最后用 Archify 自己的 `validate` 校验桥接产物。这既测 Bauify，也是对上游代码结构的一次体检。
+`test/evaluate.test.mjs` builds tiny graphs and fact sets in memory and checks the tiers of `import-cycle` field by field; the proof case (`from b import foo` before `foo` exists) mirrors a two-file layout that really raises `ImportError` in Python.
 
-### 子进程方式跑 CLI
+### Self-analysis
 
-`test/helpers.mjs` 的 `runCli` 用 `spawnSync(process.execPath, [CLI, ...args])` 真的启动一次命令行，而不是直接调函数。这样测到的是用户实际会遇到的行为：退出码、stdout 的 JSON、stderr 的文字。
+Analysing Archify's own `archify/` package asserts the three layers `bin → renderers/* → renderers/shared`, that `shared` has fan-out 0, that there is no static edge from bin to the renderers but `opaque ≥ 1`, and finally validates the bridge output with Archify's own `validate`. This tests Bauify and doubles as a health check of the upstream code structure.
 
----
+### Running the CLI as a subprocess
 
-## 12. 跨平台：Windows 上会遇到的
-
-- **路径分隔符**：Windows 是 `\`，POSIX 是 `/`。所有写进 JSON 的路径都经过 `toPosix()` 统一成 `/`，否则同一仓库在两台机器上产物不同。
-- **行尾**：Windows Git 默认 `autocrlf=true`，检出时把 LF 换成 CRLF。`.gitattributes` 里 `* text=auto eol=lf` 让仓库统一 LF；`lineCount` 用 `/\r\n|\n|\r/` 三种都认。
-- **符号链接**：Windows 普通用户建不了 symlink，要开开发者模式。Archify 的一批测试因此在 Windows 上失败，和 Bauify 无关。
-- **临时目录**：不要写死 `/tmp`，用 `os.tmpdir()`。
-- **解释器名**：`python` / `python3` / `py -3`，见第 4 节。
-- **ESM 与 Windows 绝对路径**：`import('C:\\...')` 会报 `ERR_UNSUPPORTED_ESM_URL_SCHEME`，必须先 `pathToFileURL()`。这是上游一个真实的 Windows bug。
+`runCli` in `test/helpers.mjs` really starts the command line with `spawnSync(process.execPath, [CLI, ...args])` rather than calling functions directly. What gets tested is what a user meets: exit codes, the JSON on stdout, the text on stderr.
 
 ---
 
-## 13. 名词速查
+## 14. Cross-platform: what you meet on Windows
 
-| 词 | 一句话 |
+- **Path separators**: Windows uses `\`, POSIX `/`. Every path written into JSON goes through `toPosix()` and becomes `/`; otherwise the same repository yields different artifacts on two machines.
+- **Line endings**: Windows Git defaults to `autocrlf=true` and converts LF to CRLF on checkout. `* text=auto eol=lf` in `.gitattributes` keeps the repository on LF; `lineCount` accepts `/\r\n|\n|\r/`.
+- **Symbolic links**: an ordinary Windows user cannot create symlinks without Developer Mode. A batch of Archify's tests fails on Windows for that reason; it has nothing to do with Bauify.
+- **Temporary directory**: never hard-code `/tmp`; use `os.tmpdir()`.
+- **Interpreter names**: `python` / `python3` / `py -3`, see section 4.
+- **ESM and Windows absolute paths**: `import('C:\\...')` throws `ERR_UNSUPPORTED_ESM_URL_SCHEME`; wrap the path with `pathToFileURL()` first. This was a real upstream Windows bug.
+
+---
+
+## 15. Glossary
+
+| term | one line |
 |---|---|
-| AST | 源码的树形结构，分析代码就是在树上找节点 |
-| ESM / CJS | 两种 JS 模块系统；`import` 静态可分析，`require` 是函数调用 |
-| JSON Schema | 描述 JSON 形状的规范；ajv 是校验器 |
-| raw-facts | extract 的产物：文件、角色、import 边、四类未解析计数 |
-| module graph | 文件边按目录折叠后的模块级图，带 fan-in/out 与证据 |
-| IR | 中间表示；Archify 的 `architecture` JSON 就是它的 IR |
-| fan-in / fan-out / instability | 入边数 / 出边数 / out÷(in+out) |
-| DAG | 有向无环图；分层布局的前提 |
-| 回边 | DFS 中指向"正在访问"节点的边，标志一个环 |
-| 拓扑排序 / Kahn | 在 DAG 上给节点排一个"前驱都在前面"的顺序 |
-| 非平面图 | 无论怎么画都有交叉的图；真实依赖图大多如此 |
-| PEP 420 | 没有 `__init__.py` 的目录也是 Python 包 |
-| opaque | 参数不是字面量的动态导入，静态分析看不见目标 |
-| 证据模式 | IR 带 commit sha 和源码路径，由 Archify 用 git 核对 |
-| 结构化诊断 | code / severity / subject / evidence / supportedFixes 五字段的失败对象 |
+| AST | the tree form of source code; analysing code means finding nodes in it |
+| ESM / CJS | the two JS module systems; `import` is statically analysable, `require` is a function call |
+| JSON Schema | a specification of a JSON document's shape; ajv is the validator |
+| raw-facts | extract's output: files, roles, import edges, symbols, the four unresolved counters |
+| module graph | the file edges folded by directory into module-level edges, with fan-in/out and evidence |
+| findings | evaluate's output: typed diagnostics with evidence and fixes |
+| IR | intermediate representation; Archify's `architecture` JSON is its IR |
+| fan-in / fan-out / instability | incoming edges / outgoing edges / out ÷ (in + out) |
+| SCC / Tarjan | a set of nodes that all reach each other / the one-pass algorithm that finds them |
+| lazy import | an import inside a function body; it runs when the function is called, not at load time |
+| partially initialised module | a module that is in `sys.modules` but has not finished executing; the source of circular-import errors |
+| DAG | directed acyclic graph; the precondition of layered layout |
+| back edge | an edge to an in-progress node during DFS; marks a cycle |
+| topological order / Kahn | an order of a DAG in which every predecessor comes first |
+| non-planar graph | a graph that crosses however it is drawn; most real dependency graphs |
+| PEP 420 | a directory without `__init__.py` is still a Python package |
+| opaque | a dynamic import whose argument is not a literal; static analysis cannot see the target |
+| evidence mode | an IR that carries a commit sha and source paths for Archify to verify with git |
+| structured diagnostic | the five-field failure object: code / severity / subject / evidence / supportedFixes |
+| overlay | Bauify's analysis layer injected into a copy of an Archify-delivered HTML |
 
 ---
 
-## 14. 继续读什么
+## 16. Further reading
 
-- TypeScript Compiler API：官方 wiki "Using the Compiler API"；先用 `ts.createSourceFile` 打印一棵小树，比看文档快。
-- Python `ast`：官方文档 `ast` 模块；`ast.dump(ast.parse("from . import x"), indent=2)` 一行就能看到结构。
-- JSON Schema：json-schema.org 的 "Understanding JSON Schema"，重点看 `if/then/else` 和 `additionalProperties`。
-- 图算法：任何算法教材的 DFS、拓扑排序、强连通分量（Tarjan）三节；M1 剩下的 `coupling/cycle` 就是 Tarjan。
-- 依赖度量：Robert C. Martin《敏捷软件开发：原则、模式与实践》第 20 章"包的设计原则"。
-- Archify 的契约：`archify/references/authoring-contract.md`，看"Executable geometry rules"一节就知道 bridge 为什么那样画。
+- TypeScript Compiler API: the official wiki page "Using the Compiler API"; printing a small tree with `ts.createSourceFile` teaches more than the docs.
+- Python `ast`: the `ast` module documentation; `ast.dump(ast.parse("from . import x"), indent=2)` shows the structure in one line. For circular imports, the language reference section on the import system explains `sys.modules` and partial initialisation.
+- JSON Schema: "Understanding JSON Schema" on json-schema.org, especially `if/then/else` and `additionalProperties`.
+- Graph algorithms: the DFS, topological sort, and strongly connected components (Tarjan) chapters of any algorithms textbook; `coupling/cycle` and `coupling/import-cycle` are Tarjan.
+- Dependency metrics: Robert C. Martin, *Agile Software Development: Principles, Patterns, and Practices*, chapter 20, "Principles of Package Design".
+- Archify's contract: `archify/references/authoring-contract.md`; the "Executable geometry rules" section explains why the bridge draws the way it does.

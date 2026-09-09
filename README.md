@@ -125,8 +125,9 @@ back" is a normal runtime shape, and Bauify says so instead of flagging it.
 
 Rules are independent modules under `evaluate/rules/`; `coupling/layer-violation`
 and the `redundancy/*` family are next. See [ARCHITECTURE.md](ARCHITECTURE.md)
-(Chinese) for the design, the full rule catalog, and the feasibility triage
-behind it.
+for the design, the full rule catalog, and the feasibility triage behind it,
+and [docs/TECH-GUIDE.md](docs/TECH-GUIDE.md) for a walk through the
+technology behind each stage.
 
 ## Pipeline
 
