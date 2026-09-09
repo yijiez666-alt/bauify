@@ -75,9 +75,10 @@ function lineOf(source, node) {
   return source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
 }
 
+/** Read options explicitly selected by the analyzed root; never discover ancestor configs. */
 function compilerOptions(root) {
-  const configPath = ts.findConfigFile(root, ts.sys.fileExists, 'tsconfig.json');
-  if (!configPath) return COMPILER_OPTIONS;
+  const configPath = path.join(root, 'tsconfig.json');
+  if (!ts.sys.fileExists(configPath)) return COMPILER_OPTIONS;
   const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
   if (loaded.error) fail('extract/tsconfig-invalid', 'Cannot read tsconfig.json.', { subject: { file: configPath } });
   const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path.dirname(configPath));

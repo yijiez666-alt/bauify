@@ -52,7 +52,7 @@ a legend next to the button spells the levels out:
 | colour | level | meaning |
 |---|---|---|
 | red (pulsing) | critical | an error was supplied in findings; inspect its evidence (current cycle rules emit no errors) |
-| amber | warning | an eager import cycle whose behaviour depends on import order, or a hub module |
+| amber | warning | an eager import cycle whose behaviour may depend on import order, or a hub module |
 | blue | info | deferred/conditional or package-level coupling; initialization behavior is not established |
 | green | clean | no rule fired |
 | grey | unmapped | no source code maps to this component |

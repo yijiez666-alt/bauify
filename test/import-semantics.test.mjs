@@ -204,3 +204,48 @@ test('CLI rejects raw facts from a different revision and invalid file records',
   assert.equal(malformed.status, 1);
   assert.equal(malformed.json.diagnostics[0].code, 'input/facts-incompatible');
 });
+
+
+test('single-file runtime cycles retain eager and deferred risk semantics', (t) => {
+  const eager = analyze(t, { 'a/x.py': 'from a.x import X as Y\nX = 1\n' });
+  assert.equal(eager.cycles.length, 1);
+  assert.deepEqual(eager.cycles[0].subject.files, ['a/x.py']);
+  assert.deepEqual(eager.cycles[0].evidence.path, ['a/x.py']);
+  assert.equal(eager.cycles[0].severity, 'warning');
+  assert.equal(eager.cycles[0].evidence.risk.loading, 'potential-partial-init');
+  const lazy = analyze(t, { 'a/x.py': 'def load():\n    import a.x\n' });
+  assert.equal(lazy.cycles.length, 1);
+  assert.equal(lazy.cycles[0].evidence.risk.loading, 'not-proven');
+  const typed = analyze(t, { 'a/x.py': 'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import a.x\n' });
+  assert.equal(typed.cycles.length, 0);
+});
+
+test('TypeScript extraction ignores ancestor configs but honors a root config', (t) => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'bauify-parent-config-'));
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'project');
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(root, 'entry.ts'), "import { type T } from './dep';\nimport '@alias/dep';\n");
+  fs.writeFileSync(path.join(root, 'dep.ts'), 'export type T = string;\n');
+  const baseline = extractTs(root, config).imports;
+  const options = { compilerOptions: { verbatimModuleSyntax: true, baseUrl: './project', paths: { '@alias/*': ['*'] } } };
+  fs.writeFileSync(path.join(parent, 'tsconfig.json'), JSON.stringify(options));
+  assert.deepEqual(extractTs(root, config).imports, baseline);
+  fs.writeFileSync(path.join(parent, 'tsconfig.json'), '{ invalid');
+  assert.deepEqual(extractTs(root, config).imports, baseline);
+  options.compilerOptions.baseUrl = '.';
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), JSON.stringify(options));
+  const imports = extractTs(root, config).imports;
+  assert.equal(imports[0].typeOnly, undefined);
+  assert.equal(imports[1].to, 'dep.ts');
+});
+
+test('raw facts reject unresolved implicit package initialization edges', (t) => {
+  const { facts } = analyze(t, { 'a.py': 'import pkg.sub\n', 'pkg/__init__.py': '', 'pkg/sub.py': '' });
+  const invalid = structuredClone(facts);
+  const edge = invalid.imports.find((e) => e.implicit);
+  assert.ok(edge);
+  edge.resolved = false;
+  delete edge.to;
+  assert.notDeepEqual(schemaErrors('raw-facts', invalid), []);
+});

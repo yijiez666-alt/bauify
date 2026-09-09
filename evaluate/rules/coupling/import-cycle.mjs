@@ -142,6 +142,7 @@ function reaches(start, target, out, set, beforeLine) {
   return null;
 }
 
+/** Return cyclic strongly connected components, including singleton self-imports. */
 function tarjan(nodes, edges) {
   const out = new Map(nodes.map((n) => [n, []]));
   for (const e of edges) out.get(e.from).push(e.to);
@@ -158,7 +159,7 @@ function tarjan(nodes, edges) {
     if (low.get(v) === idx.get(v)) {
       const scc = []; let w;
       do { w = stack.pop(); onStack.delete(w); scc.push(w); } while (w !== v);
-      if (scc.length > 1) sccs.push(scc.sort());
+      if (scc.length > 1 || out.get(v).includes(v)) sccs.push(scc.sort());
     }
   };
   for (const n of nodes) if (!idx.has(n)) strong(n);

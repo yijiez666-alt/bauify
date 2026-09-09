@@ -53,12 +53,16 @@
         },
         "if": { "properties": { "resolved": { "const": true } } },
         "then": { "required": ["to"] },
-        "else": { "not": { "required": ["to"] } }
+        "else": { "not": { "required": ["to"] } },
+        "allOf": [{
+          "if": { "required": ["implicit"] },
+          "then": { "properties": { "resolved": { "const": true } } }
+        }]
       }
     },
     "symbols": {
       "type": "array",
-      "description": "Module-scope bindings per file (Python adapter): the line where a name becomes bound at import time. Used to prove partially-initialised-module failures in import cycles. Empty for adapters that do not emit them.",
+      "description": "Module-scope bindings per file (Python adapter): the line where a name becomes bound at import time. Used to identify potential partial-initialization risks in import cycles; static binding order does not prove runtime failure. Empty for adapters that do not emit them.",
       "items": {
         "type": "object",
         "additionalProperties": false,
