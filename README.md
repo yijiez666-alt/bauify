@@ -30,6 +30,21 @@ Archify's artifact.
 
 ![ai-voice with the analysis layer on](docs/e2e/ai-voice-overlay.png)
 
+The pages themselves are checked in as proof, produced by the one command in
+Quick start and untouched since:
+
+| repository | delivered by Archify, analysis layered on top | result |
+|---|---|---|
+| AI-voice-assistant (Python, 171 files, 24 modules) | [`docs/e2e/ai-voice.analysis.html`](docs/e2e/ai-voice.analysis.html) · [open in browser](https://htmlpreview.github.io/?https://github.com/yijiez666-alt/bauify/blob/main/docs/e2e/ai-voice.analysis.html) | 0 errors · 1 warning (`tools` is a hub) · 2 info (a runtime cycle closed by lazy imports, its package-level shadow) |
+| Archify's own `archify/` package (JavaScript, 11 modules) | [`docs/e2e/archify.analysis.html`](docs/e2e/archify.analysis.html) · [open in browser](https://htmlpreview.github.io/?https://github.com/yijiez666-alt/bauify/blob/main/docs/e2e/archify.analysis.html) | 0 errors · 0 warnings · 0 info |
+
+Each page is self-contained (data, styles, script, and the cited source
+files are embedded), so it works from a local file with no server; the
+"open in browser" links go through a third-party previewer, and downloading
+the file is the dependable way. With the button off, each page is
+byte-for-byte what `archify deliver` produced plus the appended analysis
+blocks — Archify's own artifact was never modified.
+
 With **Code analysis** on, the authored diagram and guided views recede and
 every component gets a halo just outside its box, coloured by danger level;
 a legend next to the button spells the levels out:
@@ -64,26 +79,39 @@ is needed only for Python repositories; `BAUIFY_PYTHON` picks an interpreter
 explicitly. The commands below assume a checkout of `tt-a1i/archify` next to
 this one.
 
+One command runs the whole workflow — Bauify's pipeline, `archify deliver` on
+the hand-authored diagram, and the overlay — into one directory:
+
+```bash
+node bin/analyze.mjs analyze ../ai-voice-assistant --language py \
+  --ir examples/ai-voice.manual.architecture.json --map examples/ai-voice.overlay-map.json \
+  --out out/ai-voice --json
+```
+
+Open `out/ai-voice/repo.analysis.html`. Archify is found at `--archify`,
+`$BAUIFY_ARCHIFY_ROOT`, or the sibling `../archify` checkout, and is invoked
+through its own CLI exactly as you would by hand; if it refuses the IR, its
+receipt is passed through under `evidence.archify`. For Archify's own package
+use `--ir ../archify/examples/archify-repo.architecture.json --map
+examples/archify.overlay-map.json` and no `--language`.
+
+The same thing as three separate steps, if you want to inspect or rerun one of them:
+
 ```bash
 # 1. analyze the repository: raw-facts, module-graph, findings (and a bridge IR, see below)
 node bin/analyze.mjs run ../ai-voice-assistant --language py --out out/ai-voice --json
 
 # 2. deliver the hand-authored diagram with Archify, as usual
 node ../archify/archify/bin/archify.mjs deliver architecture \
-  examples/ai-voice.manual.architecture.json out/ai-voice-manual/repo.html \
+  examples/ai-voice.manual.architecture.json out/ai-voice/repo.html \
   --quality standard --repo-root ../ai-voice-assistant --json
 
 # 3. layer the analysis on top — a new file; the delivered HTML is untouched
-node bin/analyze.mjs overlay out/ai-voice-manual/repo.html \
+node bin/analyze.mjs overlay out/ai-voice/repo.html \
   examples/ai-voice.manual.architecture.json out/ai-voice/module-graph.json \
   --map examples/ai-voice.overlay-map.json --source ../ai-voice-assistant \
-  --out out/ai-voice-manual/repo.analysis.html --json
+  --out out/ai-voice/repo.analysis.html --json
 ```
-
-Open `out/ai-voice-manual/repo.analysis.html`. The same three steps on
-Archify's own package use `../archify/examples/archify-repo.architecture.json`
-and `examples/archify.overlay-map.json` (`run ../archify/archify`, no
-`--language` needed).
 
 Components map to modules through the `sources` in the IR; `--map` overrides
 that with `{"componentId": ["moduleId", …]}` (module ids are in
@@ -152,8 +180,10 @@ technology behind each stage.
   is the main path and the bridge is kept as a capability. `run` still
   writes it.
 - `run` — extract → graphs → evaluate → bridge into one directory.
+- `analyze` — `run`, then `archify deliver` on a hand-authored IR, then `overlay`, into one directory.
 
 ```bash
+node bin/analyze.mjs analyze  <repo-root> --ir <architecture.json> --out <dir> [--map …] [--language ts|py] [--archify <dir>] [--quality standard|showcase]
 node bin/analyze.mjs run      <repo-root> --out <dir> [--language ts|py] [--config file.json] [--json]
 node bin/analyze.mjs extract  <repo-root> [--out raw-facts.json] [--language ts|py] [--json]
 node bin/analyze.mjs graphs   raw-facts.json [--out module-graph.json]
@@ -188,9 +218,9 @@ Configuration (all optional; see `config/defaults.json`):
 
 ## For Archify users
 
-Nothing in your workflow changes. Keep authoring the IR and running
-`archify deliver`; then run `bauify run` on the repository and `bauify
-overlay` on the delivered HTML. Bauify depends on a few hooks in Archify's
+Nothing in your workflow changes. Keep authoring the IR; `bauify analyze`
+runs your usual `archify deliver` for you and adds the overlay next to it, or
+run `bauify run` and `bauify overlay` around your own `deliver` call. Bauify depends on a few hooks in Archify's
 viewer — `g[data-node-id]`, `path[data-edge-id]`, `.toolbar`, and the
 `--panel` / `--panel-border` / `--bg` / `--text` / `--text-muted` CSS
 variables — and on nothing else; it reads the IR only to map components to

@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { selectAdapter } from '../extract/index.mjs';
 import { DiagnosticError, fail, receipt } from '../extract/shared/diagnostics.mjs';
 import { schemaErrors } from '../extract/shared/schema.mjs';
@@ -19,8 +20,12 @@ const USAGE = `Usage:
   bauify bridge   module-graph.json [--out repo.architecture.json] [--config file.json] [--json]
   bauify overlay  <archify.html> <ir.json> <module-graph.json> --out <analysis.html>
                   [--map overlay-map.json] [--source <analyzed dir>] [--facts raw-facts.json] [--findings findings.json] [--json]
+  bauify analyze  <repo-root> --ir <architecture.json> --out <dir>
+                  [--map overlay-map.json] [--language ts|py] [--archify <archify checkout>] [--quality standard|showcase] [--config file.json] [--json]
 
-run = extract -> graphs -> evaluate -> bridge into one directory.
+run     = extract -> graphs -> evaluate -> bridge into one directory.
+analyze = run, then "archify deliver" on the hand-authored IR, then overlay: one command from repository to repo.analysis.html.
+          Archify is found at --archify, $BAUIFY_ARCHIFY_ROOT, or the sibling ../archify checkout.
 overlay never modifies the delivered HTML; it writes a new file next to it.`;
 
 function loadConfig(explicit) {
@@ -38,7 +43,7 @@ function parse(argv) {
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
     if (arg === '--json') opts.json = true;
-    else if (arg === '--out' || arg === '--config' || arg === '--language' || arg === '--map' || arg === '--facts' || arg === '--findings' || arg === '--source') {
+    else if (arg === '--out' || arg === '--config' || arg === '--language' || arg === '--map' || arg === '--facts' || arg === '--findings' || arg === '--source' || arg === '--ir' || arg === '--archify' || arg === '--quality') {
       const value = rest[i + 1];
       if (!value || value.startsWith('--')) fail('cli/option-value-missing', `${arg} requires a value.`, {
         subject: { option: arg }, supportedFixes: [`provide one value after ${arg}`],
@@ -200,10 +205,72 @@ function runExtract(opts) {
   });
 }
 
+// analyze: the three-step workflow in one command. Archify stays a separate
+// install; it is invoked through its CLI exactly as a person would, and its
+// receipt is passed through on failure.
+function findArchify(explicit) {
+  // An explicit --archify is taken at its word; the fallbacks only apply when none was given.
+  const candidates = (explicit ? [explicit] : [process.env.BAUIFY_ARCHIFY_ROOT, path.resolve(HERE, '..', '..', 'archify')]).filter(Boolean).map((p) => path.resolve(p));
+  for (const root of candidates) {
+    for (const pkg of [root, path.join(root, 'archify')]) {
+      const bin = path.join(pkg, 'bin', 'archify.mjs');
+      if (fs.existsSync(bin)) return { root, bin };
+    }
+  }
+  fail('cli/archify-missing', 'No Archify checkout found.', {
+    evidence: { tried: candidates },
+    supportedFixes: ['pass --archify <path to a tt-a1i/archify checkout>', 'set BAUIFY_ARCHIFY_ROOT', 'clone tt-a1i/archify next to this repository'],
+  });
+}
+
+function runAnalyze(opts) {
+  const repo = opts.positional[0];
+  if (!repo) fail('cli/input-missing', 'analyze requires <repo-root>.', { supportedFixes: ['pass the directory to analyze'] });
+  if (!opts.ir) fail('cli/input-missing', 'analyze requires --ir <architecture.json> (the hand-authored Archify diagram).', { supportedFixes: ['pass --ir examples/<repo>.manual.architecture.json'] });
+  if (!opts.out) fail('cli/out-missing', 'analyze requires --out <directory>.', { supportedFixes: ['pass --out out/<repo>'] });
+  if (!fs.existsSync(opts.ir)) fail('cli/input-invalid', `Not a file: ${opts.ir}`, { subject: { file: opts.ir }, supportedFixes: ['pass an existing architecture IR'] });
+  const archify = findArchify(opts.archify);
+  const dir = path.resolve(opts.out);
+  const repoRoot = path.resolve(repo);
+
+  const run = runPipeline({ ...opts, out: dir, json: true });
+
+  // Evidence verification only when the IR pins a repository; Archify then wants the Git top level as --repo-root.
+  const irDoc = readJsonInput(opts.ir, 'analyze --ir');
+  const top = irDoc.meta && irDoc.meta.repository ? spawnSync('git', ['-C', repoRoot, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }) : null;
+  const gitTop = top && top.status === 0 ? path.resolve(top.stdout.trim()) : null;
+  const delivered = path.join(dir, 'repo.html');
+  const args = [archify.bin, 'deliver', 'architecture', path.resolve(opts.ir), delivered, '--quality', opts.quality || 'standard', ...(gitTop ? ['--repo-root', gitTop] : []), '--json'];
+  const result = spawnSync(process.execPath, args, { encoding: 'utf8', cwd: path.dirname(archify.bin) });
+  let deliverReceipt = null;
+  try { deliverReceipt = JSON.parse(result.stdout); } catch { /* not JSON: reported below */ }
+  if (result.status !== 0 || !deliverReceipt || deliverReceipt.ok === false) {
+    fail('analyze/archify-deliver-failed', 'Archify refused the hand-authored diagram; fix the IR and rerun.', {
+      subject: { ir: path.resolve(opts.ir) },
+      evidence: { command: ['node', ...args].join(' '), exit: result.status, archify: deliverReceipt || (result.stderr || result.stdout || '').slice(0, 2000) },
+      supportedFixes: ['read the diagnostics under evidence.archify and change only what they point at', 'run the deliver command by hand to iterate'],
+    });
+  }
+
+  const overlay = runOverlay({
+    ...opts, json: true,
+    positional: [delivered, path.resolve(opts.ir), path.join(dir, 'module-graph.json')],
+    out: path.join(dir, 'repo.analysis.html'),
+    source: opts.source || repoRoot,
+  });
+  return receipt('ok', {
+    command: 'analyze', out: dir,
+    run: { extract: run.extract, graphs: run.graphs, evaluate: run.evaluate },
+    deliver: { html: delivered, quality: opts.quality || 'standard', validation: deliverReceipt.validation || null, evidence: deliverReceipt.evidence || null, artifact: deliverReceipt.artifact || null },
+    overlay: { html: overlay.out, components: overlay.components, mapped: overlay.mapped, findings: overlay.findings, snippets: overlay.snippets },
+    open: overlay.out,
+  });
+}
+
 function main() {
   const { command, opts } = parse(process.argv.slice(2));
   if (!command || command === '--help' || command === '-h') { process.stdout.write(`${USAGE}\n`); return; }
-  const COMMANDS = { extract: runExtract, graphs: runGraphs, evaluate: runEvaluate, bridge: runBridge, run: runPipeline, overlay: runOverlay };
+  const COMMANDS = { extract: runExtract, graphs: runGraphs, evaluate: runEvaluate, bridge: runBridge, run: runPipeline, overlay: runOverlay, analyze: runAnalyze };
   if (!COMMANDS[command]) fail('cli/command-unknown', `Unknown command "${command}".`, {
     subject: { command }, evidence: { supported: Object.keys(COMMANDS) }, supportedFixes: ['see usage'],
   });
