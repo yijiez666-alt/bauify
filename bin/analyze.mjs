@@ -125,6 +125,31 @@ function validateFacts(graph, facts) {
     const roles = new Set(graph.excluded.roles);
     const files = new Set(facts.files.filter((f) => !roles.has(f.role)).map((f) => f.path));
     const ownership = Object.keys(graph.fileModules);
+    // Reconcile dependency aggregates using the supplied, validated ownership map.
+    // Evidence samples and ordering are deliberately not part of this comparison.
+    const aggregates = new Map();
+    for (const imp of facts.imports) {
+      if (!imp.resolved) continue;
+      const from = graph.fileModules[imp.from], to = graph.fileModules[imp.to];
+      if (from === undefined || to === undefined || from === to) continue;
+      const key = JSON.stringify([from, to]);
+      if (!aggregates.has(key)) aggregates.set(key, { weight: 0, kinds: { eager: 0 } });
+      const aggregate = aggregates.get(key);
+      aggregate.weight += 1;
+      for (const kind of [imp.kind, ...['lazy', 'conditional', 'typeOnly', 'implicit'].filter((flag) => imp[flag])]) {
+        aggregate.kinds[kind] = (aggregate.kinds[kind] || 0) + 1;
+      }
+      if (!imp.lazy && !imp.conditional && !imp.typeOnly && !(facts.repository.language === 'ts' && imp.kind === 'dynamic')) aggregate.kinds.eager += 1;
+    }
+    const mismatch = graph.edges.length !== aggregates.size || graph.edges.some((edge) => {
+      const expected = aggregates.get(JSON.stringify([edge.from, edge.to]));
+      if (!expected || expected.weight !== edge.weight) return true;
+      // Legacy graphs may omit eager; compare every other count and explicit eager counts.
+      const keys = new Set([...Object.keys(expected.kinds), ...Object.keys(edge.kinds)]);
+      return [...keys].some((key) => !(key === 'eager' && edge.kinds.eager === undefined)
+        && (expected.kinds[key] || 0) !== (edge.kinds[key] || 0));
+    });
+    if (mismatch) errors.push({ path: '/edges', message: 'must match aggregated raw-facts imports' });
     if (ownership.length !== files.size || ownership.some((f) => !files.has(f))) errors.push({ path: '/files', message: 'must match module-graph file ownership' });
   }
   if (errors.length) fail('input/facts-incompatible', 'Raw facts are invalid or do not match the module graph.', { evidence: { errors: errors.slice(0, 20) }, supportedFixes: ['regenerate raw-facts and module-graph together'] });

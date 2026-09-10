@@ -92,6 +92,7 @@ def collect(tree):
             self.found.append({"line": node.lineno, "column": node.col_offset, **fields, **self.flags})
 
         def visit_FunctionDef(self, node):
+            self.under({"lazy": True}, getattr(node, "type_params", []))
             # Only the body is lazy, not default expressions or decorators.
             for expr in node.decorator_list + node.args.defaults + [d for d in node.args.kw_defaults if d]:
                 self.visit(expr)

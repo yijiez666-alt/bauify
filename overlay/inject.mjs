@@ -605,7 +605,7 @@ const JS = `
     var ux = dx / len, uy = dy / len;
     var ka = Math.min(Math.abs((w / 2) / (ux || 1e-6)), Math.abs((hgt / 2) / (uy || 1e-6))) + 2;
     var x1 = a.x + ux * ka, y1 = a.y + uy * ka, x2 = b.x - ux * (ka + 2), y2 = b.y - uy * (ka + 2);
-    var out = '<path class="e ' + cls + '" marker-end="url(#bauify-arrow)" d="M' + x1 + ',' + y1 + ' L' + x2 + ',' + y2 + '"/>';
+    var out = '<path class="e e ' + cls + '" marker-end="url(#bauify-arrow)" d="M' + x1 + ',' + y1 + ' L' + x2 + ',' + y2 + '"/>';
     if (label) out += '<text class="muted" x="' + ((x1 + x2) / 2 + uy * 7) + '" y="' + ((y1 + y2) / 2 - ux * 7 + 3) + '" text-anchor="middle">' + esc(label) + '</text>';
     return out;
   }
@@ -623,9 +623,10 @@ const JS = `
     if (!f) return '<div class="ev">No cycle was found in the recorded dependencies for this component. Unresolved or unmodeled execution may add dependencies.</div>';
     var isFile = f.code === 'coupling/import-cycle';
     var nodes = (f.evidence.path || []).slice(0, 8);
-    if (nodes.length < 2) return '<div class="ev">Cycle path not recorded.</div>';
+    if (nodes.length === 0) return '<div class="ev">Cycle path not recorded.</div>';
     var W = 400, H = 240, cx = W / 2, cy = H / 2, rx = 140, ry = 80, bw = 118, bh = 24;
     var pos = {}; nodes.forEach(function (n, i) { var t = -Math.PI / 2 + (2 * Math.PI * i) / nodes.length; pos[n] = { x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) }; });
+    if (nodes.length === 1) pos[nodes[0]] = { x: cx, y: cy };
     var mine = {}; (c.fileList || []).forEach(function (x) { mine[x.path] = true; }); (c.modules || []).forEach(function (m) { mine[m.id] = true; });
     var color = f.severity === 'error' ? 'red' : f.severity === 'warning' ? 'amber' : 'blue';
     var edges = [];
@@ -641,7 +642,13 @@ const JS = `
       }
     }
     var svg = svgOpen(W, H);
-    edges.forEach(function (e) { svg += arrow(pos[e.a], pos[e.b], bw, bh, color + (e.lazy ? ' lazy' : '')); });
+    edges.forEach(function (e) {
+      if (e.a === e.b) {
+        var p = pos[e.a];
+        svg += '<path class="e ' + color + (e.lazy ? ' lazy' : '') + '" d="M ' + (p.x + bw / 2) + ' ' + p.y + ' C ' + (p.x + 110) + ' ' + (p.y - 65) + ', ' + (p.x - 110) + ' ' + (p.y - 65) + ', ' + (p.x - bw / 2) + ' ' + p.y + '" fill="none" stroke="currentColor"/>';
+        svg += '<text x="' + (p.x - bw / 2 - 5) + '" y="' + (p.y + 4) + '" fill="currentColor">▶</text>';
+      } else svg += arrow(pos[e.a], pos[e.b], bw, bh, color + (e.lazy ? ' lazy' : ''));
+    });
     nodes.forEach(function (n) { svg += nodeRect(pos[n].x, pos[n].y, bw, bh, short(n), mine[n] ? 'focus' : ''); });
     svg += '</svg>';
     return svg + '<div class="caption">' + (isFile ? 'Representative file cycle. ' : 'Representative package-level cycle. ') + 'Solid = recorded module-scope dependency; dashed = deferred, conditional, type-only or asynchronous dependency. Green box = belongs to this component. Line numbers are in the findings below. ' +
@@ -674,7 +681,7 @@ const JS = `
     svg += '<text x="12" y="30">in ' + fi + '</text><rect class="bar" x="70" y="18" width="' + (fi * scale) + '" height="16"/>';
     svg += '<text x="12" y="62">out ' + fo + '</text><rect class="bar" x="70" y="50" width="' + (fo * scale) + '" height="16"/>';
     var I = ind.instability === undefined || ind.instability === null ? null : ind.instability;
-    svg += '<text class="muted" x="70" y="92">0 stable</text><text class="muted" x="320" y="92" text-anchor="end">1 volatile</text><path class="e" d="M70,86 L320,86"/>';
+    svg += '<text class="muted" x="70" y="92">0 stable</text><text class="muted" x="320" y="92" text-anchor="end">1 volatile</text><path class="e e" d="M70,86 L320,86"/>';
     if (I !== null) svg += '<circle cx="' + (70 + I * 250) + '" cy="86" r="5" fill="#34D399"/><text x="' + (70 + I * 250) + '" y="76" text-anchor="middle">I = ' + I + '</text>';
     svg += '</svg>';
     return svg + '<div class="caption">Fan-in / fan-out summed over the modules mapped to this component (each counts modules, not import statements). High fan-in says "change carefully"; high fan-out says "changes elsewhere reach me".</div>';

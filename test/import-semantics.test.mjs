@@ -300,3 +300,43 @@ test('review regressions: overlay renders candidate references without safety cl
   assert.doesNotMatch(card, /keeps the cycle out|Raises ImportError/);
   assert.doesNotThrow(() => new Function(script));
 });
+
+test('CLI rejects changed dependency aggregates with identical metadata', (t) => {
+  const { root, graph, facts } = analyze(t, { 'a.py': 'import b\n', 'b.py': 'import a\n' });
+  const gp = path.join(root, 'graph.json'), fp = path.join(root, 'facts.json');
+  fs.writeFileSync(fp, JSON.stringify(facts));
+  fs.writeFileSync(gp, JSON.stringify(graph));
+  assert.equal(runCli(['evaluate', gp, '--facts', fp, '--json']).status, 0);
+  for (const change of [(g) => { g.edges.pop(); }, (g) => { g.edges[0].weight++; }, (g) => { g.edges[0].kinds.eager = 0; }]) {
+    const altered = structuredClone(graph); change(altered);
+    fs.writeFileSync(gp, JSON.stringify(altered));
+    const result = runCli(['evaluate', gp, '--facts', fp, '--json']);
+    assert.equal(result.status, 1);
+    assert.equal(result.json.diagnostics[0].code, 'input/facts-incompatible');
+  }
+});
+
+test('Python generic function bounds retain deferred imports on 3.12+', (t) => {
+  const probe = python(os.tmpdir(), 'import sys; print(sys.version_info >= (3, 12))');
+  if (probe.stdout.trim() !== 'True') return t.skip('type parameter syntax requires Python 3.12+');
+  const { facts } = analyze(t, { 'a.py': 'def f[T: __import__(name)]():\n    pass\n' });
+  const edge = facts.imports.find((e) => e.specifier === '<computed>');
+  assert.ok(edge);
+  assert.equal(edge.lazy, true);
+  assert.equal(facts.unresolved.opaque, 1);
+});
+
+test('overlay draws a recorded singleton self-import instead of missing-path text', (t) => {
+  const { graph, facts, cycles } = analyze(t, { 'a.py': 'import a\n' });
+  const ir = { components: [{ id: 'a', label: 'a', sources: [{ path: 'a.py' }] }] };
+  const result = buildOverlay({ ir, graph, facts, html: '<body><div class="toolbar"></div><svg><g data-node-id="a"></g></svg></body>' });
+  const script = result.html.match(/id="bauify-script">([\s\S]*?)<\/script>/)[1];
+  const start = script.indexOf('  function cycleDiagram(');
+  const end = script.indexOf('\n  }', start) + 4;
+  const draw = new Function('function svgOpen(){return "<svg>"};function short(v){return v};function nodeRect(){return "<rect/>"};function arrow(){throw Error("self-loop must use curved path")};' + script.slice(start, end) + ';return cycleDiagram;')();
+  const output = draw({ fileList: [{ path: 'a.py' }], modules: [] }, cycles);
+  assert.match(output, /<path/);
+  assert.match(output, /<rect/);
+  assert.doesNotMatch(output, /Cycle path not recorded/);
+  assert.doesNotThrow(() => new Function(script));
+});
