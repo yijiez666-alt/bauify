@@ -45,7 +45,7 @@ export function extract(root, config) {
       const record = { from: rel, specifier: found.specifier, kind: found.kind, line: found.line, resolved: false };
       if (found.names.length) record.names = found.names;
       if (found.lazy) record.lazy = true;
-      if (found.typeOnly) record.typeOnly = true;
+      if (source.isDeclarationFile || found.typeOnly) record.typeOnly = true;
       const target = found.opaque ? { reason: 'opaque' } : resolve(found.specifier, abs, absRoot, fileSet, options);
       if (target.to) { record.to = target.to; record.resolved = true; }
       else unresolved[target.reason] += 1;

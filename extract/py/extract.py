@@ -157,6 +157,36 @@ def collect(tree):
             self.visit(node.test)
             self.under({"conditional": True}, node.body + node.orelse)
 
+        def visit_IfExp(self, node):
+            self.visit(node.test)
+            self.under({"conditional": True}, [node.body, node.orelse])
+
+        def visit_BoolOp(self, node):
+            self.visit(node.values[0])
+            self.under({"conditional": True}, node.values[1:])
+
+        def comprehension(self, node, values, lazy=False):
+            # Python evaluates the outer iterable when constructing even a
+            # generator. Everything after it depends on iteration and filters.
+            self.visit(node.generators[0].iter)
+            body = []
+            for index, generator in enumerate(node.generators):
+                if index:
+                    body.append(generator.iter)
+                body.extend([generator.target, *generator.ifs])
+            self.under({"conditional": True, **({"lazy": True} if lazy else {})}, body + values)
+
+        def visit_GeneratorExp(self, node):
+            self.comprehension(node, [node.elt], lazy=True)
+
+        def visit_ListComp(self, node):
+            self.comprehension(node, [node.elt])
+
+        visit_SetComp = visit_ListComp
+
+        def visit_DictComp(self, node):
+            self.comprehension(node, [node.key, node.value])
+
         def visit_Import(self, node):
             for alias in node.names:
                 self.emit(node, kind="static", level=0, module=alias.name, names=["*"])

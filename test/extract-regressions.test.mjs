@@ -112,5 +112,5 @@ test('raw-facts schema requires unresolved counters and enforces the resolved/to
   assert.ok(schemaErrors('raw-facts', { ...base, imports: [{ ...edge, resolved: true }] }).length, 'resolved without to must fail');
   assert.ok(schemaErrors('raw-facts', { ...base, imports: [{ ...edge, resolved: false, to: 'b.mjs' }] }).length, 'unresolved with to must fail');
   assert.deepEqual(schemaErrors('raw-facts', { ...base, imports: [{ ...edge, resolved: true, to: 'b.mjs' }] }), []);
-  assert.deepEqual(schemaErrors('raw-facts', { ...base, imports: [{ ...edge, resolved: false }] }), []);
+  assert.deepEqual(schemaErrors('raw-facts', { ...base, imports: [{ ...edge, resolved: false }], unresolved: { ...base.unresolved, unknown: 1 } }), []);
 });

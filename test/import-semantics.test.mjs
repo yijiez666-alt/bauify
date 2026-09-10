@@ -381,3 +381,61 @@ test('module kind evidence rejects empty and eager-only counts while preserving 
     assert.deepEqual(schemaErrors('module-graph', graph), []);
   }
 });
+
+test('Python expression guards preserve eager prefixes and deferred bodies', (t) => {
+  const expressions = [
+    '__import__("b") if flag else None',
+    'flag and __import__("b")',
+    'flag or __import__("b")',
+    '(__import__("b") for x in [])',
+    '[__import__("b") for x in []]',
+    '{__import__("b") for x in []}',
+    '{x: __import__("b") for x in []}',
+  ];
+  for (const expression of expressions) {
+    const { facts, cycles } = analyze(t, { 'a.py': `value = ${expression}\n`, 'b.py': 'import a\n' });
+    assert.equal(facts.imports.find(e => e.to === 'b.py').conditional, true, expression);
+    assert.equal(cycles[0].severity, 'info', expression);
+  }
+  for (const expression of ['__import__("b") and flag', 'value if __import__("b") else None', '(x for x in __import__("b"))', '[x for x in __import__("b")]']) {
+    const { facts, cycles } = analyze(t, { 'a.py': `value = ${expression}\n`, 'b.py': 'import a\n' });
+    const edge = facts.imports.find(e => e.to === 'b.py');
+    assert.equal(edge.conditional, undefined, expression);
+    assert.equal(edge.lazy, undefined, expression);
+    assert.equal(cycles[0].severity, 'warning', expression);
+  }
+  const { facts } = analyze(t, {
+    'a.py': 'value = (__import__("elt") for x in __import__("outer") if __import__("guard") for y in __import__("inner"))\ndef f():\n    return [x for x in __import__("nested")]\n',
+  });
+  for (const name of ['elt', 'guard', 'inner']) {
+    const edge = facts.imports.find(e => e.specifier === name);
+    assert.equal(edge.lazy, true);
+    assert.equal(edge.conditional, true);
+  }
+  assert.equal(facts.imports.find(e => e.specifier === 'outer').lazy, undefined);
+  assert.equal(facts.imports.find(e => e.specifier === 'nested').lazy, true);
+});
+
+test('declaration imports remain structural without runtime cycles', (t) => {
+  for (const extension of ['mts', 'cts']) {
+    const suffix = extension === 'mts' ? 'mjs' : 'cjs';
+    const { facts, cycles, graph } = analyze(t, {
+      [`a.d.${extension}`]: `import { B } from './b.${suffix}'; export interface A { b: B }`,
+      [`b.d.${extension}`]: `export { A } from './a.${suffix}'; export interface B { value: string }`,
+    }, 'ts');
+    assert.equal(facts.imports.length, 2);
+    assert.ok(facts.imports.every(e => e.typeOnly));
+    assert.equal(graph.edges.length, 2);
+    assert.equal(cycles.length, 0);
+  }
+});
+
+test('raw facts reject undercounted and overcounted unresolved imports', (t) => {
+  const { facts } = analyze(t, { 'a.py': 'import missing\n' });
+  assert.deepEqual(schemaErrors('raw-facts', facts), []);
+  for (const total of [0, 2]) {
+    const changed = structuredClone(facts);
+    changed.unresolved = { external: total, outside: 0, unknown: 0, opaque: 0 };
+    assert.ok(schemaErrors('raw-facts', changed).some(e => e.path === '/unresolved'));
+  }
+});

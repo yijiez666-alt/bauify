@@ -13,6 +13,10 @@ export function semanticErrors(name, data) {
     return seen;
   };
   if (name === 'raw-facts') {
+    const unresolved = data.imports.filter((edge) => !edge.resolved).length;
+    if (Object.values(data.unresolved).reduce((sum, count) => sum + count, 0) !== unresolved) {
+      add('/unresolved', 'counter total must match unresolved imports');
+    }
     const files = unique(data.files, 'path', '/files');
     data.imports.forEach((edge, i) => {
       if (!files.has(edge.from)) add(`/imports/${i}/from`, 'must reference a recorded file');
