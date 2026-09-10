@@ -249,3 +249,54 @@ test('raw facts reject unresolved implicit package initialization edges', (t) =>
   delete edge.to;
   assert.notDeepEqual(schemaErrors('raw-facts', invalid), []);
 });
+
+test('review regressions: loop targets and statement-scoped initializer deduplication', (t) => {
+  const { facts } = analyze(t, {
+    'entry.py': 'import pkg.a, pkg.b\nimport pkg.a; import pkg.b\nfor items[importlib.import_module(name).key] in values:\n    pass\n',
+    'pkg/__init__.py': '', 'pkg/a.py': '', 'pkg/b.py': '',
+  });
+  assert.equal(facts.imports.filter((e) => e.implicit && e.line === 1).length, 1);
+  assert.equal(facts.imports.filter((e) => e.implicit && e.line === 2).length, 2);
+  const opaque = facts.imports.find((e) => e.specifier === '<computed>');
+  assert.equal(opaque.conditional, true);
+  assert.equal(facts.unresolved.opaque, 1);
+});
+
+test('review regressions: explicit zero eager counts and legacy graph classification', (t) => {
+  const { graph } = analyze(t, { 'a.py': 'def f():\n    import b\n', 'b.py': 'import a\n' });
+  assert.ok(graph.edges.some((e) => e.kinds.eager === 0));
+  assert.equal(evaluate(graph).diagnostics.find((d) => d.code === 'coupling/cycle').evidence.kind, 'mixed');
+  for (const e of graph.edges) e.kinds = { static: e.weight };
+  assert.deepEqual(schemaErrors('module-graph', graph), []);
+  assert.equal(evaluate(graph).diagnostics.find((d) => d.code === 'coupling/cycle').evidence.kind, 'eager');
+});
+
+test('review regressions: import evidence and ownership errors are order independent', (t) => {
+  const { facts, graph } = analyze(t, { 'a.py': 'import b\n', 'b.py': 'import a\n' });
+  facts.imports = Array.from({ length: 20 }, (_, n) => ({ ...facts.imports[0], names: ['Z', String(n)] })).concat(facts.imports[1]);
+  const first = evaluate(graph, {}, facts);
+  facts.imports.reverse();
+  assert.deepEqual(evaluate(graph, {}, facts), first);
+  graph.fileModules = { 'z.py': 'missing-z', 'a.py': 'missing-a' };
+  const errors = schemaErrors('module-graph', graph);
+  graph.fileModules = Object.fromEntries(Object.entries(graph.fileModules).reverse());
+  assert.deepEqual(schemaErrors('module-graph', graph), errors);
+});
+
+test('review regressions: overlay renders candidate references without safety claims', (t) => {
+  const { facts, graph } = analyze(t, { 'a.py': 'import b\nclass A: pass\n', 'b.py': 'from a import A\n' });
+  const ir = { components: [{ id: 'a', label: 'a', sources: [{ path: 'a.py' }] }] };
+  const result = buildOverlay({ ir, graph, facts, html: '<body><div class="toolbar"></div><svg><g data-node-id="a"></g></svg></body>' });
+  const script = result.html.match(/id="bauify-script">([\s\S]*?)<\/script>/)[1];
+  const cardStart = script.indexOf('  function findingCard');
+  const cardEnd = script.indexOf('\n  }', cardStart) + 4;
+  const functions = script.slice(script.indexOf('  function ref('), cardEnd);
+  const render = new Function('function esc(v){return String(v)}; function short(v){return v};' + functions + '; return findingCard;')();
+  const finding = evaluate(graph, {}, facts).diagnostics.find((d) => d.code === 'coupling/import-cycle');
+  finding.evidence.imports.push({ file: 'a.py', line: 1, to: 'b.py', conditional: true });
+  const card = render(finding);
+  assert.match(card, /Potential partial initialization/);
+  assert.match(card, /Execution timing is not proven/);
+  assert.doesNotMatch(card, /keeps the cycle out|Raises ImportError/);
+  assert.doesNotThrow(() => new Function(script));
+});

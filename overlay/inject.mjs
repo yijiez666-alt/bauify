@@ -240,7 +240,8 @@ function collectSnippets(findings, sourceRoot) {
     const ev = f.evidence || {};
     for (const v of ev.imports || []) if (v.file) wanted.add(v.file);
     for (const v of ev.closingLazyImports || []) if (v.file) wanted.add(v.file);
-    if (ev.proof) { wanted.add(ev.proof.entry); wanted.add(ev.proof.importer); }
+    const candidate = ev.partialInitCandidate || ev.proof;
+    if (candidate) { wanted.add(candidate.entry); wanted.add(candidate.importer); }
     if (f.subject && f.subject.file) wanted.add(f.subject.file);
   }
   const out = {};
@@ -388,7 +389,7 @@ const JS = `
   // Danger levels behind the colours. Same wording everywhere: legend, badge, detail header.
   var LEVELS = {
     red: { name: 'critical', text: 'an error was reported; inspect its evidence and assumptions' },
-    amber: { name: 'warning', text: 'eager import cycle (import-order dependent) or hub module' },
+    amber: { name: 'warning', text: 'eager import cycle (potentially import-order dependent) or hub module' },
     blue: { name: 'info', text: 'structural coupling; initialization behavior is not established' },
     green: { name: 'clean', text: 'no rule fired' },
     grey: { name: 'unmapped', text: 'no source code maps to this component' },
@@ -491,20 +492,21 @@ const JS = `
     var ev = '';
     var tone = f.severity === 'error' ? 'red' : f.severity === 'warning' ? 'amber' : 'blue';
     if (f.evidence && f.evidence.risk) ev += '<div class="ev"><div>import risk: <b>' + esc(f.evidence.risk.loading) + '</b> — ' + esc(f.evidence.risk.loadingNote) + '</div></div>';
-    if (f.evidence && f.evidence.proof) {
-      var pr = f.evidence.proof;
-      ev += '<div class="ev" style="margin-top:4px">fails when <b>' + esc(pr.entry) + '</b> is imported first (chain ' + esc(pr.chain.join(' → ')) + '):</div>';
-      ev += ref(pr.entry, pr.viaLine, '<span>→ leaves for ' + esc(short(pr.chain[1] || pr.importer)) + ' before <b>' + esc(pr.name) + '</b> exists</span>', 'This module-scope import runs before ' + pr.name + ' is bound (line ' + pr.boundAt + '); everything it pulls in sees this file half-built.', 'red');
-      ev += ref(pr.importer, pr.line, '<span>→ asks the half-built ' + esc(short(pr.entry)) + ' for <b>' + esc(pr.name) + '</b></span>', 'Raises ImportError: cannot import name ' + pr.name + ' from partially initialized module.', 'red');
-      ev += ref(pr.entry, pr.boundAt, '<span>→ <b>' + esc(pr.name) + '</b> is bound here, too late</span>', 'The binding the other side needed; it only exists once the file has run this far.', 'amber');
+    if (f.evidence && (f.evidence.partialInitCandidate || f.evidence.proof)) {
+      var pr = f.evidence.partialInitCandidate || f.evidence.proof;
+      ev += '<div class="ev" style="margin-top:4px">Potential partial initialization when <b>' + esc(pr.entry) + '</b> is imported first (chain ' + esc(pr.chain.join(' → ')) + '):</div>';
+      ev += ref(pr.entry, pr.viaLine, '<span>→ leaves for ' + esc(short(pr.chain[1] || pr.importer)) + ' before <b>' + esc(pr.name) + '</b> exists</span>', 'This module-scope import runs before ' + pr.name + ' is bound (line ' + pr.boundAt + '); static line order alone does not prove the execution sequence.', tone);
+      ev += ref(pr.importer, pr.line, '<span>→ asks the half-built ' + esc(short(pr.entry)) + ' for <b>' + esc(pr.name) + '</b></span>', 'May read ' + pr.name + ' before its binding; execution timing and failure are not proven.', tone);
+      ev += ref(pr.entry, pr.boundAt, '<span>→ <b>' + esc(pr.name) + '</b> has its recorded binding here</span>', 'The binding the other side needed; it only exists once the file has run this far.', 'amber');
     }
     if (f.evidence && f.evidence.imports && f.evidence.imports.length) {
       var isCycle = f.code === 'coupling/import-cycle' || f.code === 'coupling/cycle';
       ev += '<div class="ev" style="margin-top:4px">' + (isCycle ? 'Imports on the cycle — click one to see the code:' : 'Evidence — click to see the code:') + '</div>';
       f.evidence.imports.slice(0, 8).forEach(function (v) {
-        var kindText = v.lazy ? 'function-scope import · dashed' : 'module-scope import · solid';
+        var deferred = v.lazy || v.conditional || v.deferred || v.typeOnly;
+        var kindText = deferred ? 'deferred / conditional / type-only import · dashed' : 'recorded module-scope import · solid';
         ev += ref(v.file, v.line, '<span>→ ' + esc(short(v.to)) + '</span> <em>· ' + kindText + '</em>',
-          v.lazy ? 'Inside a function body, so it runs only when that function is called — this is what keeps the cycle out of import time.' : 'At module scope, so it runs while this file is being imported.', tone);
+          deferred ? 'Execution timing is not proven; deferred functions may be called during initialization. Type-only imports are not runtime dependencies.' : 'Recorded at module scope; execution order and runtime behavior are not verified.', tone);
       });
       if (f.evidence.imports.length > 8) ev += '<div class="ev">… ' + (f.evidence.imports.length - 8) + ' more in findings.json</div>';
     }

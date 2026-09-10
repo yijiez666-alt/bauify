@@ -13,13 +13,15 @@ export const confidence = 1.0;
 // body. This is lexical evidence only; the function may run at import time.
 const lazyOnly = (e) => (e.kinds.lazy || 0) > 0 && e.kinds.lazy === e.weight;
 
+/** Explicit counts take precedence; legacy mixed flags remain conservatively unverified. */
+const isEager = (e) => e.kinds.eager !== undefined ? e.kinds.eager > 0
+  : !['lazy', 'typeOnly', 'conditional'].some((flag) => e.kinds[flag] > 0);
+
 export function run({ graph }) {
   const ids = graph.modules.map((m) => m.id).sort();
   const sccsOf = (edges) => tarjan(ids, edges);
   const all = sccsOf(graph.edges);
-  const eager = sccsOf(graph.edges.filter((e) => graph.fileModules
-    ? (e.kinds.eager || 0) > 0
-    : !lazyOnly(e) && e.kinds.typeOnly !== e.weight && e.kinds.conditional !== e.weight));
+  const eager = sccsOf(graph.edges.filter(isEager));
   const eagerKey = new Set(eager.map((scc) => scc.join(' ')));
 
   const labelOf = new Map(graph.modules.map((m) => [m.id, m.label]));
@@ -45,9 +47,9 @@ export function run({ graph }) {
       evidence: {
         kind,
         path,
-        edges: internal.map((e) => ({ from: e.from, to: e.to, weight: e.weight, lazy: e.kinds.lazy || 0, ...(graph.fileModules ? { deferred: !(e.kinds.eager > 0) } : {}) })),
+        edges: internal.map((e) => ({ from: e.from, to: e.to, weight: e.weight, lazy: e.kinds.lazy || 0, deferred: !isEager(e) })),
         closingLazyImports: lazyEdges.flatMap((e) => e.evidence.map((v) => ({ file: v.file, line: v.line, to: v.to }))).slice(0, 8),
-        imports: internal.flatMap((e) => e.evidence.slice(0, 2).map((v) => ({ file: v.file, line: v.line, to: v.to, ...(v.lazy ? { lazy: true } : {}) }))).slice(0, 12),
+        imports: internal.flatMap((e) => e.evidence.slice(0, 2).map((v) => ({ file: v.file, line: v.line, to: v.to, ...Object.fromEntries(['lazy', 'conditional', 'typeOnly', 'deferred'].filter((flag) => v[flag]).map((flag) => [flag, true])) }))).slice(0, 12),
         totalImports: internal.reduce((n, e) => n + e.weight, 0),
         threshold: null,
       },

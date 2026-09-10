@@ -42,14 +42,14 @@ export function buildModuleGraph(facts, config = {}) {
     const to = fileModule.get(imp.to);
     if (from === undefined || to === undefined || from === to) continue;
     const key = `${from}\0${to}`;
-    if (!edgeMap.has(key)) edgeMap.set(key, { from: ids.get(from), to: ids.get(to), weight: 0, kinds: {}, evidence: [] });
+    if (!edgeMap.has(key)) edgeMap.set(key, { from: ids.get(from), to: ids.get(to), weight: 0, kinds: { eager: 0 }, evidence: [] });
     const edge = edgeMap.get(key);
     edge.weight += 1;
     edge.kinds[imp.kind] = (edge.kinds[imp.kind] || 0) + 1;
     if (imp.lazy) edge.kinds.lazy = (edge.kinds.lazy || 0) + 1;
     for (const flag of ['typeOnly', 'conditional', 'implicit']) if (imp[flag]) edge.kinds[flag] = (edge.kinds[flag] || 0) + 1;
     if (!imp.lazy && !imp.typeOnly && !imp.conditional && !(facts.repository.language === 'ts' && imp.kind === 'dynamic')) edge.kinds.eager = (edge.kinds.eager || 0) + 1;
-    if (edge.evidence.length < 5) edge.evidence.push({ file: imp.from, line: imp.line, to: imp.to, ...Object.fromEntries(['lazy', 'typeOnly', 'conditional', 'implicit'].filter((flag) => imp[flag]).map((flag) => [flag, true])) });
+    if (edge.evidence.length < 5) edge.evidence.push({ file: imp.from, line: imp.line, to: imp.to, ...Object.fromEntries(['lazy', 'typeOnly', 'conditional', 'implicit'].filter((flag) => imp[flag]).map((flag) => [flag, true])), ...(facts.repository.language === 'ts' && imp.kind === 'dynamic' ? { deferred: true } : {}) });
     incoming.set(imp.to, (incoming.get(imp.to) || 0) + 1);
   }
 

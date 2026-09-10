@@ -89,7 +89,7 @@ def collect(tree):
             self.flags = previous
 
         def emit(self, node, **fields):
-            self.found.append({"line": node.lineno, **fields, **self.flags})
+            self.found.append({"line": node.lineno, "column": node.col_offset, **fields, **self.flags})
 
         def visit_FunctionDef(self, node):
             # Only the body is lazy, not default expressions or decorators.
@@ -137,7 +137,7 @@ def collect(tree):
 
         def visit_For(self, node):
             self.visit(node.iter)
-            self.under({"conditional": True}, node.body + node.orelse)
+            self.under({"conditional": True}, [node.target] + node.body + node.orelse)
 
         visit_AsyncFor = visit_For
 

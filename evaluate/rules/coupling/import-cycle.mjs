@@ -9,11 +9,16 @@ export const dimension = 'coupling';
 export const severity = 'warning';
 export const confidence = 0.7;
 
+/** Canonicalize ties before choosing candidates or truncating evidence. */
+const canonical = (v) => JSON.stringify(Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object'
+  ? Object.keys(v).sort().map((key) => [key, canonical(v[key])]) : v);
+const compareImport = (a, b) => canonical(a) < canonical(b) ? -1 : canonical(a) > canonical(b) ? 1 : 0;
+
 export function run({ graph, facts }) {
   if (!facts) return [];
   const excluded = new Set(graph.excluded.roles || []);
   const skip = new Set(facts.files.filter((f) => excluded.has(f.role)).map((f) => f.path));
-  const edges = facts.imports.filter((i) => i.resolved && !i.typeOnly && !skip.has(i.from) && !skip.has(i.to));
+  const edges = facts.imports.filter((i) => i.resolved && !i.typeOnly && !skip.has(i.from) && !skip.has(i.to)).map((e) => ({ ...e, ...(e.names ? { names: [...e.names].sort() } : {}) })).sort(compareImport);
   const files = [...new Set(edges.flatMap((e) => [e.from, e.to]))].sort();
   const all = tarjan(files, edges);
   const eagerEdges = edges.filter((e) => !e.lazy && !e.conditional && !(facts.repository.language === 'ts' && e.kind === 'dynamic'));
@@ -60,7 +65,7 @@ export function run({ graph, facts }) {
           const edge = options.find((e) => eagerEdges.includes(e)) || options[0];
           return { file: from, to, line: edge.line, deferred: !eagerEdges.includes(edge) };
         }),
-        imports: internal.map((e) => ({ file: e.from, line: e.line, to: e.to, ...(e.names && e.names.length ? { names: e.names } : {}), ...Object.fromEntries(['lazy', 'conditional', 'implicit'].filter((flag) => e[flag]).map((flag) => [flag, true])), kind: e.kind })).sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line)).slice(0, 16),
+        imports: internal.map((e) => ({ file: e.from, line: e.line, to: e.to, ...(e.names && e.names.length ? { names: e.names } : {}), ...Object.fromEntries(['lazy', 'conditional', 'implicit'].filter((flag) => e[flag]).map((flag) => [flag, true])), kind: e.kind, ...(facts.repository.language === 'ts' && e.kind === 'dynamic' ? { deferred: true } : {}) })).sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line || compareImport(a, b))).slice(0, 16),
         lazyImports: internal.filter((e) => e.lazy).length,
         totalImports: internal.length,
         ...(candidate ? { partialInitCandidate: candidate } : {}),

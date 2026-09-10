@@ -57,6 +57,7 @@ export function extract(root, config) {
     fileRecords.push({ path: record.path, loc: record.loc, role: classifyRole(record.path, config.roles) });
     for (const b of record.symbols || []) symbols.push({ file: record.path, name: b.name, kind: b.kind, line: b.line });
     if (record.error) { parseErrors.push({ path: record.path, message: record.error }); continue; }
+    const implicitStatements = new Set();
     for (const found of record.imports) {
       const flags = Object.fromEntries(['lazy', 'typeOnly', 'conditional'].filter((key) => found[key]).map((key) => [key, true]));
       if (found.opaque) {
@@ -65,6 +66,12 @@ export function extract(root, config) {
         continue;
       }
       for (const edge of resolveImport(found, record.path, fileSet)) {
+        // Aliases share an AST statement position; semicolon-separated statements do not.
+        if (edge.implicit) {
+          const key = JSON.stringify([found.line, found.column, edge.to]);
+          if (implicitStatements.has(key)) continue;
+          implicitStatements.add(key);
+        }
         const out = { from: record.path, specifier: edge.specifier, kind: found.kind, line: found.line, resolved: false, ...flags };
         if (edge.names && edge.names.length) out.names = edge.names;
         if (edge.implicit) out.implicit = true;

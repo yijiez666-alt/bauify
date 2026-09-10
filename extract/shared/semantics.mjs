@@ -37,7 +37,7 @@ export function semanticErrors(name, data) {
     });
     if (data.fileModules) {
       const counts = new Map();
-      for (const [file, id] of Object.entries(data.fileModules)) {
+      for (const [file, id] of Object.entries(data.fileModules).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
         if (!ids.has(id)) add('/fileModules', 'must reference an existing module', { file, id });
         counts.set(id, (counts.get(id) || 0) + 1);
       }
