@@ -25,19 +25,21 @@ export function run({ graph }) {
   const eagerKey = new Set(eager.map((scc) => scc.join(' ')));
 
   const labelOf = new Map(graph.modules.map((m) => [m.id, m.label]));
-  const out = new Map(ids.map((id) => [id, []]));
-  for (const e of graph.edges) out.get(e.from).push(e.to);
-  for (const list of out.values()) list.sort();
   const sccs = all;
   return sccs.sort((a, b) => b.length - a.length || (a[0] < b[0] ? -1 : 1)).map((scc) => {
     const set = new Set(scc);
     const internal = graph.edges.filter((e) => set.has(e.from) && set.has(e.to));
-    const path = shortestCycle(scc[0], out, set);
+
     // Check this whole component. A smaller module-scope SCC may still be
     // nested inside it, so a mixed component is never described as safe.
     const eagerSurvives = eagerKey.has(scc.join(' ')) || eager.some((e) => e.length > 1 && e.every((m) => set.has(m)) && e.length === scc.length);
     const lazyEdges = internal.filter(lazyOnly);
     const kind = eagerSurvives ? 'eager' : 'mixed';
+    const pathEdges = eagerSurvives ? internal.filter(isEager) : internal;
+    const pathOut = new Map(scc.map((id) => [id, []]));
+    for (const edge of pathEdges) pathOut.get(edge.from).push(edge.to);
+    for (const targets of pathOut.values()) targets.sort();
+    const path = shortestCycle(scc[0], pathOut, set);
     return {
       code, dimension, severity, confidence,
       message: eagerSurvives

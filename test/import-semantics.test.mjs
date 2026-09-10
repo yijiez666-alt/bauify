@@ -340,3 +340,44 @@ test('overlay draws a recorded singleton self-import instead of missing-path tex
   assert.doesNotMatch(output, /Cycle path not recorded/);
   assert.doesNotThrow(() => new Function(script));
 });
+
+test('eager module cycles choose a supporting eager path despite shorter lazy cycles', (t) => {
+  const { findings } = analyze(t, { 'a.py': 'import b\n', 'b.py': 'import c\ndef f():\n    import a\n', 'c.py': 'import a\n' });
+  const cycle = findings.diagnostics.find((f) => f.code === 'coupling/cycle');
+  assert.equal(cycle.evidence.kind, 'eager');
+  assert.equal(cycle.evidence.path.length, 3);
+  cycle.evidence.path.forEach((from, i, nodes) => {
+    const edge = cycle.evidence.edges.find((e) => e.from === from && e.to === nodes[(i + 1) % nodes.length]);
+    assert.equal(edge.deferred, false);
+  });
+});
+
+test('finally imports inherit enclosing flags instead of adding a conditional guard', (t) => {
+  const { facts } = analyze(t, { 'a.py': 'try:\n    pass\nfinally:\n    import b\nif flag:\n    try:\n        pass\n    finally:\n        import b\ndef f():\n    try:\n        pass\n    finally:\n        import b\n', 'b.py': '' });
+  const imports = facts.imports.filter((e) => e.to === 'b.py');
+  assert.equal(imports.length, 3);
+  assert.equal(imports[0].conditional, undefined);
+  assert.equal(imports[1].conditional, true);
+  assert.equal(imports[2].lazy, true);
+  assert.equal(imports[2].conditional, undefined);
+});
+
+test('Python 3.12 class bounds and aliases are lazy while class bases and bodies are eager', (t) => {
+  if (python(os.tmpdir(), 'import sys; print(sys.version_info >= (3, 12))').stdout.trim() !== 'True') return t.skip('requires Python 3.12+');
+  const { facts } = analyze(t, { 'a.py': 'class C[T: __import__(bound)](__import__(base).Base):\n    value = __import__(body)\ntype Alias[T: __import__(constraint)] = __import__(alias)\n' });
+  assert.equal(facts.unresolved.opaque, 5);
+  assert.equal(facts.imports.filter((e) => e.lazy).length, 3);
+  assert.equal(facts.imports.filter((e) => !e.lazy).length, 2);
+});
+
+test('module kind evidence rejects empty and eager-only counts while preserving legacy forms', (t) => {
+  const { graph } = analyze(t, { 'a.py': 'import b\n', 'b.py': '' });
+  for (const kinds of [{}, { eager: 0 }, { eager: 1 }]) {
+    graph.edges[0].kinds = kinds;
+    assert.notDeepEqual(schemaErrors('module-graph', graph), []);
+  }
+  for (const kinds of [{ static: 1 }, { eager: 0, lazy: 1 }, { eager: 1, static: 1 }]) {
+    graph.edges[0].kinds = kinds;
+    assert.deepEqual(schemaErrors('module-graph', graph), []);
+  }
+});

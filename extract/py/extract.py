@@ -108,6 +108,16 @@ def collect(tree):
 
         visit_AsyncFunctionDef = visit_FunctionDef
 
+        def visit_ClassDef(self, node):
+            # Bounds are lazy; bases, decorators and the class body retain outer scope.
+            self.under({"lazy": True}, getattr(node, "type_params", []))
+            for expr in node.decorator_list + node.bases + node.keywords + node.body:
+                self.visit(expr)
+
+        def visit_TypeAlias(self, node):
+            # PEP 695 alias values and parameter bounds evaluate on demand.
+            self.under({"lazy": True}, getattr(node, "type_params", []) + [node.value])
+
         def visit_Lambda(self, node):
             for expr in node.args.defaults + [d for d in node.args.kw_defaults if d]:
                 self.visit(expr)
@@ -132,7 +142,8 @@ def collect(tree):
                 self.under({"conditional": True}, node.body + node.orelse)
 
         def visit_Try(self, node):
-            self.under({"conditional": True}, node.body + node.handlers + node.orelse + node.finalbody)
+            self.under({"conditional": True}, node.body + node.handlers + node.orelse)
+            self.under({}, node.finalbody)
 
         visit_TryStar = visit_Try
 
