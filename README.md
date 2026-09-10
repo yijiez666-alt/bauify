@@ -30,8 +30,8 @@ Archify's artifact.
 
 ![ai-voice with the analysis layer on](docs/e2e/ai-voice-overlay.png)
 
-The pages themselves are checked in as proof, produced by the one command in
-Quick start and untouched since:
+The checked-in pages below are historical demonstration snapshots. Regenerate
+them with Quick start to use the current extraction and conservative risk rules:
 
 | repository | delivered by Archify, analysis layered on top | result |
 |---|---|---|
@@ -51,9 +51,9 @@ a legend next to the button spells the levels out:
 
 | colour | level | meaning |
 |---|---|---|
-| red (pulsing) | critical | a load-time import failure is proven from the facts |
-| amber | warning | an eager import cycle whose behaviour depends on import order, or a hub module |
-| blue | info | a cycle closed only by lazy imports, or one that exists only at package level — coupling to know about, no import risk |
+| red (pulsing) | critical | an error was supplied in findings; inspect its evidence (current cycle rules emit no errors) |
+| amber | warning | an eager import cycle whose behaviour may depend on import order, or a hub module |
+| blue | info | deferred/conditional or package-level coupling; initialization behavior is not established |
 | green | clean | no rule fired |
 | grey | unmapped | no source code maps to this component |
 
@@ -131,19 +131,18 @@ the call. A cycle is reported as a fact with `evidence.risk.loading` rather
 than as a judgment about the design; "LLM calls tools, a tool calls the LLM
 back" is a normal runtime shape, and Bauify says so instead of flagging it.
 
-- `coupling/import-cycle` — file-level import cycles from raw-facts, in
-  tiers. **info**: the cycle is closed only by function-scope (lazy) imports;
-  no eager cycle exists and nothing runs at import time (`loading:
-  none-at-import`). **warning**: every edge is a module-scope import.
-  Python tolerates this in general — the second module finds the first one,
-  partially initialised, in `sys.modules` — so behaviour depends on import
-  order (`order-dependent`). **error**: the failure is proven — file B does
-  `from A import X` and A binds `X` after the import that leads back to B,
-  so the named load order raises *cannot import name 'X' from partially
-  initialized module* (`proven-failure`, with the failing order, chain, and
-  lines in `evidence.proof`). The proof needs the adapter's module-scope
-  symbols, which the Python adapter emits; TypeScript never goes above
-  warning.
+- `coupling/import-cycle` — runtime file-level cycles. Type-only imports are
+  retained in raw facts and the structural module graph, but excluded here.
+  **info** (`loading: not-proven`): the component contains deferred or
+  conditional imports. A function may be called during initialization; this
+  classification is not a safety guarantee. **warning** (`potential-at-import`):
+  a module-scope cycle. If recorded binding order suggests an early named
+  read, `potential-partial-init` includes a `partialInitCandidate` with the
+  assumed entry, chain and lines. Static line ordering does not model full
+  execution, so it no longer produces `proven-failure` or error severity.
+  Runtime-risk confidence is 0.7, an ordinal heuristic level, not a calibrated
+  probability. Smaller module-scope cycles inside mixed components are
+  reported separately.
 - `coupling/cycle` — package-level strongly connected components on the
   module graph; info. Often an artifact of directory grouping; it points at
   `import-cycle` for whether any file actually cycles.
@@ -162,12 +161,17 @@ technology behind each stage.
 - `extract` — JS/TS via the TypeScript Compiler API; Python via the standard
   library `ast` (relative imports, packages, PEP 420 namespace packages,
   `importlib.import_module` literals, function-scope imports flagged `lazy`,
-  module-scope symbol bindings with their line). Output is schema-validated
+  module-scope symbol bindings with their line). Both adapters record lexical
+  deferral and type-only imports; Python also records conditional imports and
+  implicit package initialization. TypeScript reads tsconfig options, including
+  path aliases and verbatimModuleSyntax. Output is schema-validated
   and byte-deterministic.
 - `graphs` — folds file edges into modules (explicit groups > package
   boundary > directory depth; root-level files are modules of their own),
   with fan-in / fan-out / instability and up to five file:line evidence
-  entries per edge. Test and generated files are excluded and counted.
+  entries per edge. These are structural metrics, including type dependencies,
+  not runtime reliability scores. Colliding module IDs receive deterministic
+  suffixes; exact file ownership is saved in `fileModules`. Test and generated files are excluded and counted.
 - `evaluate` — the rules above, stable ids (`COUP-0001`), `config.ignore`
   to suppress a rule.
 - `overlay` — the analysis layer described above, injected into a copy of an
@@ -232,9 +236,10 @@ modules.
 npm test
 ```
 
-Fixture and regression tests run anywhere, including the tiers of
-`import-cycle` (a proven partial-initialisation failure is checked against a
-real `ImportError`). The tests that analyze Archify's own package or call
+Fixture and regression tests run anywhere, including type-only imports, dynamic scope, package initialization, ID
+collisions, graph references and file ownership. Test-authored Python/JS
+fixtures are executed to compare risk estimates with actual loading; analyzed
+repositories are never executed by the analyzer. The tests that analyze Archify's own package or call
 Archify's validator need a checkout of `tt-a1i/archify`: a sibling
 `../archify` is used by default; set `BAUIFY_ARCHIFY_ROOT` to point
 elsewhere. They are skipped, not failed, when it is absent. CI pins that
@@ -242,9 +247,19 @@ checkout to a fixed revision.
 
 ## Known limits
 
-- Only `from module import name` is analysed for the partial-initialisation
-  proof; a module-scope `module.attr` access on a half-built module is not
-  detected and stays a warning.
+- This is static dependency analysis, not a full interpreter or call graph.
+  Deferred functions, callbacks, decorators, guards, exception handling,
+  import caches, module attributes and dynamic bindings can change loading.
+  No cycle finding or clean indicator proves runtime success or failure.
+- Type-only recognition covers explicit TypeScript forms and unshadowed
+  Python `typing.TYPE_CHECKING` aliases. Arbitrary typing guards and dynamic
+  loader aliases may remain runtime/unknown dependencies.
+- Graph validation checks unique module IDs, existing edge endpoints,
+  duplicate edge pairs, and exact ownership when available. JSON Schema
+  alone cannot establish those relationships.
+- Output includes new optional import flags and `fileModules`; regenerate old
+  raw-facts, module-graph, findings and overlays together. The old risk labels
+  `none-at-import` / `proven-failure` are not emitted by current cycle rules.
 - Archify's `showcase` profile rejects every edge crossing. A module map
   folded from a real dependency graph is usually non-planar, so the bridge
   declares `standard` by default; dense graphs render with crossing warnings

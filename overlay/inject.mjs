@@ -3,7 +3,7 @@
 // The delivered artifact is never modified; a new file is written next to it.
 // The overlay adds one toolbar button ("Code analysis"). When it is on, the
 // authored diagram and guided views recede and every mapped component gets a
-// status ring around its box: pulsing red when a load-time import failure is proven,
+// status ring around its box: pulsing red for supplied error findings,
 // amber when a rule warns (eager cycle, hub), blue when only informational facts exist
 // (lazy/runtime or package-level cycle), green when nothing fired, grey when no code maps to it.
 // A legend next to the hint spells out the danger level behind each colour.
@@ -106,9 +106,8 @@ function indicators(set, mods, findings, mapping, filePaths) {
   if (!mods.length) return { status: 'grey', items: [] };
   const owner = new Map();
   for (const [cid, ids] of mapping) for (const id of ids) owner.set(id, cid);
-  // Tiers follow the rule's severities: red = a load-time failure proven from the facts,
-  // amber = an eager cycle whose behaviour depends on import order, blue = a cycle that
-  // exists only through lazy imports or at package level (a coupling fact, no import risk).
+  // Tiers follow reported severity. Current cycle rules use warning or info;
+  // neither a deferred cycle nor a missing finding establishes import safety.
   const fileCycles = findings.filter((f) => f.code === 'coupling/import-cycle' && f.subject.files.some((p) => filePaths.has(p)));
   const proven = fileCycles.filter((f) => f.severity === 'error');
   const eagerFileCycles = fileCycles.filter((f) => f.evidence.kind === 'eager' && f.severity !== 'error');
@@ -119,11 +118,11 @@ function indicators(set, mods, findings, mapping, filePaths) {
   const internalOnly = cycles.length > 0 && partners.size === 0;
   const cycleStatus = proven.length ? 'red' : eagerFileCycles.length ? 'amber' : (lazyFileCycles.length || cycles.length) ? 'blue' : 'green';
   const cycleValue = proven.length
-    ? `import cycle that fails at load time (${proven.map((f) => f.subject.files.length).join(', ')} files) ${proven[0].evidence.risk ? ` — ${proven[0].evidence.risk.loadingNote}` : ""}`
+    ? `reported import-cycle error (${proven.map((f) => f.subject.files.length).join(', ')} files) ${proven[0].evidence.risk ? ` — ${proven[0].evidence.risk.loadingNote}` : ""}`
     : eagerFileCycles.length
-      ? `eager import cycle (${eagerFileCycles.map((f) => f.subject.files.length).join(', ')} files); loads today, import-order dependent`
+      ? `module-scope import cycle (${eagerFileCycles.map((f) => f.subject.files.length).join(', ')} files); load-time behavior unverified`
       : lazyFileCycles.length
-        ? `runtime cycle closed by lazy imports (${lazyFileCycles.map((f) => f.subject.files.length).join(', ')} files); no import-time risk`
+        ? `cycle with deferred or conditional imports (${lazyFileCycles.map((f) => f.subject.files.length).join(', ')} files); initialization behavior not proven`
         : cycles.length
           ? (internalOnly ? 'package-level cycle inside this component; no file cycles' : `package-level cycle with ${partners.size} other${partners.size === 1 ? '' : 's'}; no file cycles`)
           : 'none';
@@ -167,8 +166,9 @@ function indexFiles(graph, facts) {
   const byDepth = [...graph.modules].sort((a, b) => b.path.split('/').length - a.path.split('/').length);
   const excluded = new Set(graph.excluded.roles || []);
   const moduleOf = (file) => {
+    if (graph.fileModules) return graph.fileModules[file] || null;
     for (const m of byDepth) { if (m.path === '') continue; if (file === m.path || file.startsWith(`${m.path}/`)) return m.id; }
-    return file.includes('/') ? null : (graph.modules.find((m) => m.path === '') || {}).id || null;
+    return file.includes('/') ? null : (graph.modules.find((m) => m.path === '' && m.entry.includes(file)) || {}).id || null;
   };
   const out = new Map(); const inn = new Map();
   for (const i of facts.imports) if (i.resolved) { out.set(i.from, (out.get(i.from) || 0) + 1); inn.set(i.to, (inn.get(i.to) || 0) + 1); }
@@ -190,11 +190,12 @@ function resolveMapping(ir, graph, map) {
   const byPathDepth = [...graph.modules].sort((a, b) => b.path.split('/').length - a.path.split('/').length);
   const moduleForFile = (file) => {
     const rel = graph.repository.root && graph.repository.root !== '.' && file.startsWith(`${graph.repository.root}/`) ? file.slice(graph.repository.root.length + 1) : file;
+    if (graph.fileModules && graph.fileModules[rel]) return graph.fileModules[rel];
     for (const m of byPathDepth) {
       if (m.path === '' ) continue;
       if (rel === m.path || rel.startsWith(`${m.path}/`)) return m.id;
     }
-    return rel.includes('/') ? null : (graph.modules.find((m) => m.path === '') || {}).id || null;
+    return rel.includes('/') ? null : (graph.modules.find((m) => m.path === '' && m.entry.includes(rel)) || {}).id || null;
   };
   for (const c of ir.components) {
     if (map && Array.isArray(map[c.id])) { result.set(c.id, [...new Set(map[c.id])]); continue; }
@@ -239,7 +240,8 @@ function collectSnippets(findings, sourceRoot) {
     const ev = f.evidence || {};
     for (const v of ev.imports || []) if (v.file) wanted.add(v.file);
     for (const v of ev.closingLazyImports || []) if (v.file) wanted.add(v.file);
-    if (ev.proof) { wanted.add(ev.proof.entry); wanted.add(ev.proof.importer); }
+    const candidate = ev.partialInitCandidate || ev.proof;
+    if (candidate) { wanted.add(candidate.entry); wanted.add(candidate.importer); }
     if (f.subject && f.subject.file) wanted.add(f.subject.file);
   }
   const out = {};
@@ -386,9 +388,9 @@ const JS = `
   document.body.appendChild(codePane);
   // Danger levels behind the colours. Same wording everywhere: legend, badge, detail header.
   var LEVELS = {
-    red: { name: 'critical', text: 'a load-time import failure is proven from the facts' },
-    amber: { name: 'warning', text: 'eager import cycle (import-order dependent) or hub module' },
-    blue: { name: 'info', text: 'runtime or package-level cycle; coupling to know about, no import risk' },
+    red: { name: 'critical', text: 'an error was reported; inspect its evidence and assumptions' },
+    amber: { name: 'warning', text: 'eager import cycle (potentially import-order dependent) or hub module' },
+    blue: { name: 'info', text: 'structural coupling; initialization behavior is not established' },
     green: { name: 'clean', text: 'no rule fired' },
     grey: { name: 'unmapped', text: 'no source code maps to this component' },
     neutral: { name: 'metric', text: 'a number, not a verdict' }
@@ -490,20 +492,21 @@ const JS = `
     var ev = '';
     var tone = f.severity === 'error' ? 'red' : f.severity === 'warning' ? 'amber' : 'blue';
     if (f.evidence && f.evidence.risk) ev += '<div class="ev"><div>import risk: <b>' + esc(f.evidence.risk.loading) + '</b> — ' + esc(f.evidence.risk.loadingNote) + '</div></div>';
-    if (f.evidence && f.evidence.proof) {
-      var pr = f.evidence.proof;
-      ev += '<div class="ev" style="margin-top:4px">fails when <b>' + esc(pr.entry) + '</b> is imported first (chain ' + esc(pr.chain.join(' → ')) + '):</div>';
-      ev += ref(pr.entry, pr.viaLine, '<span>→ leaves for ' + esc(short(pr.chain[1] || pr.importer)) + ' before <b>' + esc(pr.name) + '</b> exists</span>', 'This module-scope import runs before ' + pr.name + ' is bound (line ' + pr.boundAt + '); everything it pulls in sees this file half-built.', 'red');
-      ev += ref(pr.importer, pr.line, '<span>→ asks the half-built ' + esc(short(pr.entry)) + ' for <b>' + esc(pr.name) + '</b></span>', 'Raises ImportError: cannot import name ' + pr.name + ' from partially initialized module.', 'red');
-      ev += ref(pr.entry, pr.boundAt, '<span>→ <b>' + esc(pr.name) + '</b> is bound here, too late</span>', 'The binding the other side needed; it only exists once the file has run this far.', 'amber');
+    if (f.evidence && (f.evidence.partialInitCandidate || f.evidence.proof)) {
+      var pr = f.evidence.partialInitCandidate || f.evidence.proof;
+      ev += '<div class="ev" style="margin-top:4px">Potential partial initialization when <b>' + esc(pr.entry) + '</b> is imported first (chain ' + esc(pr.chain.join(' → ')) + '):</div>';
+      ev += ref(pr.entry, pr.viaLine, '<span>→ leaves for ' + esc(short(pr.chain[1] || pr.importer)) + ' before <b>' + esc(pr.name) + '</b> exists</span>', 'This module-scope import runs before ' + pr.name + ' is bound (line ' + pr.boundAt + '); static line order alone does not prove the execution sequence.', tone);
+      ev += ref(pr.importer, pr.line, '<span>→ asks the half-built ' + esc(short(pr.entry)) + ' for <b>' + esc(pr.name) + '</b></span>', 'May read ' + pr.name + ' before its binding; execution timing and failure are not proven.', tone);
+      ev += ref(pr.entry, pr.boundAt, '<span>→ <b>' + esc(pr.name) + '</b> has its recorded binding here</span>', 'The binding the other side needed; it only exists once the file has run this far.', 'amber');
     }
     if (f.evidence && f.evidence.imports && f.evidence.imports.length) {
       var isCycle = f.code === 'coupling/import-cycle' || f.code === 'coupling/cycle';
       ev += '<div class="ev" style="margin-top:4px">' + (isCycle ? 'Imports on the cycle — click one to see the code:' : 'Evidence — click to see the code:') + '</div>';
       f.evidence.imports.slice(0, 8).forEach(function (v) {
-        var kindText = v.lazy ? 'function-scope import · dashed' : 'module-scope import · solid';
+        var deferred = v.lazy || v.conditional || v.deferred || v.typeOnly;
+        var kindText = deferred ? 'deferred / conditional / type-only import · dashed' : 'recorded module-scope import · solid';
         ev += ref(v.file, v.line, '<span>→ ' + esc(short(v.to)) + '</span> <em>· ' + kindText + '</em>',
-          v.lazy ? 'Inside a function body, so it runs only when that function is called — this is what keeps the cycle out of import time.' : 'At module scope, so it runs while this file is being imported.', tone);
+          deferred ? 'Execution timing is not proven; deferred functions may be called during initialization. Type-only imports are not runtime dependencies.' : 'Recorded at module scope; execution order and runtime behavior are not verified.', tone);
       });
       if (f.evidence.imports.length > 8) ev += '<div class="ev">… ' + (f.evidence.imports.length - 8) + ' more in findings.json</div>';
     }
@@ -553,7 +556,7 @@ const JS = `
     h += '<div class="level"><b>' + esc(lvl.name) + '</b> — ' + esc(ind.value) + (ind.status === 'neutral' ? '' : '<br>' + esc(lvl.text)) + '</div>';
     h += '<div class="k">Diagram details</div>' + diagram(c, key, fl);
     h += '<div class="k">Findings · ' + fl.length + '</div>';
-    if (!fl.length) h += '<div class="ev">' + (key === 'instability' ? 'Instability is a metric, not a rule: out / (in + out). 0 = everything depends on it (stable), 1 = it depends on everything (volatile).' : 'None for this indicator.') + '</div>';
+    if (!fl.length) h += '<div class="ev">' + (key === 'instability' ? 'Instability measures dependency direction: out / (in + out). 0 = no outgoing dependencies, 1 = no incoming dependents. It is not a failure probability or a quality verdict.' : 'No finding for this indicator; this is not a safety guarantee.') + '</div>';
     fl.forEach(function (f) { h += findingCard(f); });
     detail.innerHTML = h;
     detail.hidden = false;
@@ -602,7 +605,7 @@ const JS = `
     var ux = dx / len, uy = dy / len;
     var ka = Math.min(Math.abs((w / 2) / (ux || 1e-6)), Math.abs((hgt / 2) / (uy || 1e-6))) + 2;
     var x1 = a.x + ux * ka, y1 = a.y + uy * ka, x2 = b.x - ux * (ka + 2), y2 = b.y - uy * (ka + 2);
-    var out = '<path class="e ' + cls + '" marker-end="url(#bauify-arrow)" d="M' + x1 + ',' + y1 + ' L' + x2 + ',' + y2 + '"/>';
+    var out = '<path class="e e ' + cls + '" marker-end="url(#bauify-arrow)" d="M' + x1 + ',' + y1 + ' L' + x2 + ',' + y2 + '"/>';
     if (label) out += '<text class="muted" x="' + ((x1 + x2) / 2 + uy * 7) + '" y="' + ((y1 + y2) / 2 - ux * 7 + 3) + '" text-anchor="middle">' + esc(label) + '</text>';
     return out;
   }
@@ -617,12 +620,13 @@ const JS = `
   // Ring of the files (or modules) on the shortest cycle; lazy edges dashed.
   function cycleDiagram(c, fl) {
     var f = fl.filter(function (x) { return x.code === 'coupling/import-cycle'; })[0] || fl.filter(function (x) { return x.code === 'coupling/cycle'; })[0];
-    if (!f) return '<div class="ev">No cycle touches this component. Its files import others; nothing imports back.</div>';
+    if (!f) return '<div class="ev">No cycle was found in the recorded dependencies for this component. Unresolved or unmodeled execution may add dependencies.</div>';
     var isFile = f.code === 'coupling/import-cycle';
     var nodes = (f.evidence.path || []).slice(0, 8);
-    if (nodes.length < 2) return '<div class="ev">Cycle path not recorded.</div>';
+    if (nodes.length === 0) return '<div class="ev">Cycle path not recorded.</div>';
     var W = 400, H = 240, cx = W / 2, cy = H / 2, rx = 140, ry = 80, bw = 118, bh = 24;
     var pos = {}; nodes.forEach(function (n, i) { var t = -Math.PI / 2 + (2 * Math.PI * i) / nodes.length; pos[n] = { x: cx + rx * Math.cos(t), y: cy + ry * Math.sin(t) }; });
+    if (nodes.length === 1) pos[nodes[0]] = { x: cx, y: cy };
     var mine = {}; (c.fileList || []).forEach(function (x) { mine[x.path] = true; }); (c.modules || []).forEach(function (m) { mine[m.id] = true; });
     var color = f.severity === 'error' ? 'red' : f.severity === 'warning' ? 'amber' : 'blue';
     var edges = [];
@@ -630,19 +634,25 @@ const JS = `
     for (var i = 0; i < nodes.length; i++) {
       var a = nodes[i], b = nodes[(i + 1) % nodes.length];
       if (isFile) {
-        var hit = imports.filter(function (v) { return v.file === a && v.to === b; })[0];
-        edges.push({ a: a, b: b, lazy: !!(hit && hit.lazy) });
+        var hit = (f.evidence.pathImports || imports).filter(function (v) { return v.file === a && v.to === b; })[0];
+        edges.push({ a: a, b: b, lazy: !!(hit && (hit.deferred || hit.lazy || hit.conditional)) });
       } else {
         var me = (f.evidence.edges || []).filter(function (v) { return v.from === a && v.to === b; })[0];
-        edges.push({ a: a, b: b, lazy: !!(me && me.lazy && me.lazy === me.weight) });
+        edges.push({ a: a, b: b, lazy: !!(me && (me.deferred || (me.lazy && me.lazy === me.weight))) });
       }
     }
     var svg = svgOpen(W, H);
-    edges.forEach(function (e) { svg += arrow(pos[e.a], pos[e.b], bw, bh, color + (e.lazy ? ' lazy' : '')); });
+    edges.forEach(function (e) {
+      if (e.a === e.b) {
+        var p = pos[e.a];
+        svg += '<path class="e ' + color + (e.lazy ? ' lazy' : '') + '" d="M ' + (p.x + bw / 2) + ' ' + p.y + ' C ' + (p.x + 110) + ' ' + (p.y - 65) + ', ' + (p.x - 110) + ' ' + (p.y - 65) + ', ' + (p.x - bw / 2) + ' ' + p.y + '" fill="none" stroke="currentColor"/>';
+        svg += '<text x="' + (p.x - bw / 2 - 5) + '" y="' + (p.y + 4) + '" fill="currentColor">▶</text>';
+      } else svg += arrow(pos[e.a], pos[e.b], bw, bh, color + (e.lazy ? ' lazy' : ''));
+    });
     nodes.forEach(function (n) { svg += nodeRect(pos[n].x, pos[n].y, bw, bh, short(n), mine[n] ? 'focus' : ''); });
     svg += '</svg>';
-    return svg + '<div class="caption">' + (isFile ? 'Shortest file cycle. ' : 'Shortest package-level cycle. ') + 'Solid = module-scope import, dashed = function-scope (lazy) import; green box = belongs to this component. Line numbers are in the findings below. ' +
-      (f.evidence.kind === 'lazy-closed' ? 'The dashed edge is the only thing closing the loop, so nothing runs at import time.' : f.severity === 'error' ? 'Every edge runs at import time and the marked name is read before it is bound.' : 'Every edge runs at import time; safe as long as no name is read from the half-built side.') + '</div>';
+    return svg + '<div class="caption">' + (isFile ? 'Representative file cycle. ' : 'Representative package-level cycle. ') + 'Solid = recorded module-scope dependency; dashed = deferred, conditional, type-only or asynchronous dependency. Green box = belongs to this component. Line numbers are in the findings below. ' +
+      (f.evidence.kind !== 'eager' ? 'This dependency component contains deferred, conditional, or type-only edges. The drawing does not prove import-time safety.' : 'Module-scope dependency cycle. Inspect execution order and binding access; a graph alone does not prove failure.') + '</div>';
   }
   // Star: dependents on the left, dependencies on the right.
   function hubDiagram(c, fl) {
@@ -671,7 +681,7 @@ const JS = `
     svg += '<text x="12" y="30">in ' + fi + '</text><rect class="bar" x="70" y="18" width="' + (fi * scale) + '" height="16"/>';
     svg += '<text x="12" y="62">out ' + fo + '</text><rect class="bar" x="70" y="50" width="' + (fo * scale) + '" height="16"/>';
     var I = ind.instability === undefined || ind.instability === null ? null : ind.instability;
-    svg += '<text class="muted" x="70" y="92">0 stable</text><text class="muted" x="320" y="92" text-anchor="end">1 volatile</text><path class="e" d="M70,86 L320,86"/>';
+    svg += '<text class="muted" x="70" y="92">0 stable</text><text class="muted" x="320" y="92" text-anchor="end">1 volatile</text><path class="e e" d="M70,86 L320,86"/>';
     if (I !== null) svg += '<circle cx="' + (70 + I * 250) + '" cy="86" r="5" fill="#34D399"/><text x="' + (70 + I * 250) + '" y="76" text-anchor="middle">I = ' + I + '</text>';
     svg += '</svg>';
     return svg + '<div class="caption">Fan-in / fan-out summed over the modules mapped to this component (each counts modules, not import statements). High fan-in says "change carefully"; high fan-out says "changes elsewhere reach me".</div>';

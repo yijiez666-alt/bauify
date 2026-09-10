@@ -66,25 +66,25 @@ function factsOf(imports, roles = {}) {
     unresolved: { external: 0, outside: 0, unknown: 0, opaque: 0 } };
 }
 
-test('import-cycle: an eager file cycle is a warning, a lazy-closed one is info, neither is an error without proof', () => {
+test('import-cycle: eager cycles warn and deferred cycles remain unverified, never asserted safe', () => {
   const graph = graphOf([['a', 'b'], ['b', 'a']]);
   const eager = evaluate(graph, {}, factsOf([{ from: 'a/x.py', to: 'b/y.py' }, { from: 'b/y.py', to: 'a/x.py' }]));
   const f = eager.diagnostics.find((d) => d.code === 'coupling/import-cycle');
-  assert.equal(f.severity, 'warning', 'Python tolerates eager cycles in general; only a proven partial-init read is an error');
+  assert.equal(f.severity, 'warning', 'a dependency graph is not an execution proof');
   assert.equal(f.evidence.kind, 'eager');
-  assert.equal(f.evidence.risk.loading, 'order-dependent');
+  assert.equal(f.evidence.risk.loading, 'potential-at-import');
   assert.deepEqual(f.subject.files, ['a/x.py', 'b/y.py']);
   assert.deepEqual(f.evidence.path, ['a/x.py', 'b/y.py']);
   const lazy = evaluate(graph, {}, factsOf([{ from: 'a/x.py', to: 'b/y.py' }, { from: 'b/y.py', to: 'a/x.py', lazy: true, line: 40 }]));
   const g = lazy.diagnostics.find((d) => d.code === 'coupling/import-cycle');
   assert.equal(g.severity, 'info');
-  assert.equal(g.evidence.kind, 'lazy-closed');
-  assert.equal(g.evidence.risk.loading, 'none-at-import');
+  assert.equal(g.evidence.kind, 'deferred');
+  assert.equal(g.evidence.risk.loading, 'not-proven');
   assert.equal(g.evidence.lazyImports, 1);
   assert.ok(g.evidence.imports.some((i) => i.lazy && i.line === 40));
 });
 
-test('import-cycle: `from a import bar` before a binds bar is a proven load-time failure (error) with the failing order named', () => {
+test('import-cycle: binding line order produces a partial-init candidate with its assumptions exposed', () => {
   const graph = graphOf([['a', 'b'], ['b', 'a']]);
   // a.py: line 1 `from b import foo`, line 3 `def bar`. b.py: line 1 `from a import bar`, line 3 `def foo`.
   const facts = factsOf([{ from: 'a/x.py', to: 'b/y.py', line: 1, names: ['foo'] }, { from: 'b/y.py', to: 'a/x.py', line: 1, names: ['bar'] }]);
@@ -93,11 +93,11 @@ test('import-cycle: `from a import bar` before a binds bar is a proven load-time
     { file: 'b/y.py', name: 'bar', kind: 'import', line: 1 }, { file: 'b/y.py', name: 'foo', kind: 'function', line: 3 },
   ];
   const f = evaluate(graph, {}, facts).diagnostics.find((d) => d.code === 'coupling/import-cycle');
-  assert.equal(f.severity, 'error');
-  assert.equal(f.evidence.risk.loading, 'proven-failure');
+  assert.equal(f.severity, 'warning');
+  assert.equal(f.evidence.risk.loading, 'potential-partial-init');
   // Both load orders fail here; the rule reports the first in deterministic (edge) order: b imported first, a asks it for foo too early.
-  assert.deepEqual(f.evidence.proof, { entry: 'b/y.py', module: 'b/y.py', name: 'foo', boundAt: 3, viaLine: 1, importer: 'a/x.py', line: 1, chain: ['b/y.py', 'a/x.py'] });
-  assert.match(f.message, /partially initialized/);
+  assert.deepEqual(f.evidence.partialInitCandidate, { entry: 'b/y.py', module: 'b/y.py', name: 'foo', boundAt: 3, viaLine: 1, importer: 'a/x.py', line: 1, chain: ['b/y.py', 'a/x.py'] });
+  assert.match(f.message, /does not prove failure/);
   // Same shape but the name is bound before the import that closes the loop: nothing to prove, stays a warning.
   const safe = factsOf([{ from: 'a/x.py', to: 'b/y.py', line: 5, names: ['foo'] }, { from: 'b/y.py', to: 'a/x.py', line: 5, names: ['bar'] }]);
   safe.symbols = [

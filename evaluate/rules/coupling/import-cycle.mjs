@@ -1,39 +1,27 @@
-// coupling/import-cycle — file-level import cycles from raw-facts.
-//
-// A cycle is a fact; how much it can hurt is a separate question, and the rule
-// answers it in tiers instead of equating "cycle" with "broken":
-//   - info    — the cycle is closed only by function-scope (lazy) imports. No
-//               eager import cycle exists; nothing happens at import time.
-//               Common and often deliberate in agent-style code (LLM calls
-//               tools, a tool calls the LLM back). Reported as coupling, not
-//               as a defect.
-//   - warning — every edge is a module-scope import (an eager cycle). Python
-//               tolerates this in general: the second module finds the first
-//               one, partially initialised, in sys.modules. It only fails when
-//               a name is pulled out of that partial module before the line
-//               that binds it has run. ESM behaves alike (bindings in TDZ).
-//   - error   — that failure is proven from the facts: file B does
-//               `from A import X`, X is bound in A at a line after A's own
-//               import that leads (eagerly) to B, so loading A first raises
-//               "cannot import name 'X' from partially initialized module".
-//               The evidence names the load order that fails. Needs the
-//               adapter's module-scope symbols (Python); without them the
-//               rule never goes above warning.
-// Test and generated files are excluded the same way the module graph does.
-// Confidence 1.0: static facts only.
+// File-level dependency cycles, with conservative load-time risk estimates.
+// Type-only edges are structural facts, not runtime imports. Deferred and
+// conditional execution is not modeled as safe: callers may run at import
+// time. Module-scope cycles warn; binding line order supplies an inspectable
+// partial-initialization candidate, never an execution proof.
+// Test and generated files follow the module graph's exclusion policy.
 export const code = 'coupling/import-cycle';
 export const dimension = 'coupling';
 export const severity = 'warning';
-export const confidence = 1.0;
+export const confidence = 0.7;
+
+/** Canonicalize ties before choosing candidates or truncating evidence. */
+const canonical = (v) => JSON.stringify(Array.isArray(v) ? v.map(canonical) : v && typeof v === 'object'
+  ? Object.keys(v).sort().map((key) => [key, canonical(v[key])]) : v);
+const compareImport = (a, b) => canonical(a) < canonical(b) ? -1 : canonical(a) > canonical(b) ? 1 : 0;
 
 export function run({ graph, facts }) {
   if (!facts) return [];
   const excluded = new Set(graph.excluded.roles || []);
   const skip = new Set(facts.files.filter((f) => excluded.has(f.role)).map((f) => f.path));
-  const edges = facts.imports.filter((i) => i.resolved && !skip.has(i.from) && !skip.has(i.to));
+  const edges = facts.imports.filter((i) => i.resolved && !i.typeOnly && !skip.has(i.from) && !skip.has(i.to)).map((e) => ({ ...e, ...(e.names ? { names: [...e.names].sort() } : {}) })).sort(compareImport);
   const files = [...new Set(edges.flatMap((e) => [e.from, e.to]))].sort();
   const all = tarjan(files, edges);
-  const eagerEdges = edges.filter((e) => !e.lazy);
+  const eagerEdges = edges.filter((e) => !e.lazy && !e.conditional && !(facts.repository.language === 'ts' && e.kind === 'dynamic'));
   const eager = tarjan(files, eagerEdges);
   const eagerKeys = new Set(eager.map((s) => s.join('\n')));
   const bindings = indexBindings(facts.symbols || []);
@@ -47,38 +35,44 @@ export function run({ graph, facts }) {
     const set = new Set(scc);
     const internal = (isEager ? eagerEdges : edges).filter((e) => set.has(e.from) && set.has(e.to));
     const path = shortestCycle(scc[0], internal, set);
-    const proof = isEager ? provePartialInit(set, internal, bindings) : null;
-    const tier = proof ? 'error' : isEager ? 'warning' : 'info';
+    const candidate = isEager ? findPartialInitCandidate(set, internal, bindings) : null;
+    const tier = isEager ? 'warning' : 'info';
     const cycleText = `${path.join(' → ')} → ${path[0]}`;
     findings.push({
       code, dimension, confidence,
       severity: tier,
-      message: proof
-        ? `${scc.length} files form an eager import cycle that fails at load time when ${proof.entry} is imported first: ${proof.importer}:${proof.line} does \`from ${proof.module} import ${proof.name}\`, but ${proof.entry} binds ${proof.name} at line ${proof.boundAt}, after its line-${proof.viaLine} import that leads to ${proof.importer}. Python raises "cannot import name '${proof.name}' from partially initialized module".`
+      message: candidate
+        ? `${scc.length} files form a module-scope import cycle with a possible partial-initialization read: ${candidate.importer}:${candidate.line} imports ${candidate.name} from ${candidate.entry}, whose recorded binding is at line ${candidate.boundAt}, after its line-${candidate.viaLine} import. Inspect the candidate load order starting with ${candidate.entry}; static line ordering alone does not prove failure.`
         : isEager
-          ? `${scc.length} files form an eager (module-scope) import cycle: ${cycleText}. Loads today, but each file may see the other partially initialised; any module-scope use of a name from the other side depends on import order.`
-          : `${scc.length} files form a dependency cycle closed only by function-scope (lazy) imports: ${cycleText}. No eager import cycle; nothing runs at import time. A coupling fact — often intentional when one side calls the other back at runtime — not a defect.`,
+          ? `${scc.length} files form a module-scope import cycle: ${cycleText}. Load-time behavior is not verified; accesses to partially initialized modules may depend on import order.`
+          : `${scc.length} files form a dependency cycle containing deferred or conditional imports: ${cycleText}. Initialization-time behavior is not proven: functions can be called during import, and dynamic imports or guards need execution context. Any module-scope subcycles are reported separately.`,
       subject: { files: scc },
       evidence: {
-        kind: isEager ? 'eager' : 'lazy-closed',
+        kind: isEager ? 'eager' : 'deferred',
         risk: {
-          loading: proof ? 'proven-failure' : isEager ? 'order-dependent' : 'none-at-import',
+          loading: candidate ? 'potential-partial-init' : isEager ? 'potential-at-import' : 'not-proven',
           coupling: 'present',
-          loadingNote: proof
-            ? `fails when ${proof.entry} is loaded before ${proof.importer}`
+          loadingNote: candidate
+            ? `inspect the candidate order starting with ${candidate.entry}; failure is not proven`
             : isEager
-              ? 'no name is provably read from a partially initialised module; module-scope attribute access is not analysed'
-              : 'the cycle is only entered when the lazy-importing function is called',
+              ? 'module-scope dependency cycle; execution and attribute reads are not fully modeled'
+              : 'call timing and conditional execution are not modeled; no import-safety guarantee',
         },
         path,
-        imports: internal.map((e) => ({ file: e.from, line: e.line, to: e.to, ...(e.names && e.names.length ? { names: e.names } : {}), ...(e.lazy ? { lazy: true } : {}) })).sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line)).slice(0, 16),
+        pathImports: path.map((from, i) => {
+          const to = path[(i + 1) % path.length];
+          const options = internal.filter((e) => e.from === from && e.to === to);
+          const edge = options.find((e) => eagerEdges.includes(e)) || options[0];
+          return { file: from, to, line: edge.line, deferred: !eagerEdges.includes(edge) };
+        }),
+        imports: internal.map((e) => ({ file: e.from, line: e.line, to: e.to, ...(e.names && e.names.length ? { names: e.names } : {}), ...Object.fromEntries(['lazy', 'conditional', 'implicit'].filter((flag) => e[flag]).map((flag) => [flag, true])), kind: e.kind, ...(facts.repository.language === 'ts' && e.kind === 'dynamic' ? { deferred: true } : {}) })).sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line || compareImport(a, b))).slice(0, 16),
         lazyImports: internal.filter((e) => e.lazy).length,
         totalImports: internal.length,
-        ...(proof ? { proof } : {}),
+        ...(candidate ? { partialInitCandidate: candidate } : {}),
         threshold: null,
       },
-      supportedFixes: proof
-        ? [`move \`${proof.name}\` above the line-${proof.viaLine} import in ${proof.entry}, or turn that import into a function-scope one`, 'move the shared definitions into a new module both sides import', 'pass the dependency in as a parameter instead of importing it']
+      supportedFixes: candidate
+        ? [`verify the load order and binding of \`${candidate.name}\` in ${candidate.entry} before changing code`, 'move shared definitions into a module both sides import if the cycle is unintended', 'pass the dependency in as a parameter instead of importing it']
         : isEager
           ? ['prefer `import module` + attribute access at call time over `from module import name` inside the cycle', 'move the shared definitions into a new module both sides import', 'turn one direction into a function-scope import if the dependency is only needed at call time']
           : ['keep the lazy import if the call-back is intentional, and say so in a comment at the import', 'if the two sides should be testable in isolation, inject the callee (a callback or protocol) from the composition root instead of importing it'],
@@ -102,12 +96,14 @@ function indexBindings(symbols) {
   return byFile;
 }
 
-// Proof search. For every eager `from A import X` (importer B, explicit name X
+// Candidate search. For every module-scope `from A import X` (importer B, explicit name X
 // bound in A at line boundAt): is there an eager path A → … → B whose first
 // hop leaves A at a line before boundAt? If so, importing A first executes A
 // up to that hop, which (transitively) runs B, which asks the half-built A
-// for X before it exists. Returns the first proof in deterministic order.
-function provePartialInit(set, internal, bindings) {
+// for X before it exists under this assumed path. Returns the first candidate.
+// Branches, callbacks, earlier import caches and dynamic bindings can change
+// execution, so this graph search cannot establish a guaranteed failure.
+function findPartialInitCandidate(set, internal, bindings) {
   const out = new Map();
   for (const e of internal) (out.get(e.from) || out.set(e.from, []).get(e.from)).push(e);
   for (const list of out.values()) list.sort((a, b) => a.line - b.line || (a.to < b.to ? -1 : 1));
@@ -131,6 +127,10 @@ function provePartialInit(set, internal, bindings) {
 function reaches(start, target, out, set, beforeLine) {
   for (const first of out.get(start) || []) {
     if (first.line >= beforeLine) continue;
+    if (first.to === start) {
+      if (target === start) return { viaLine: first.line, chain: [start, start] };
+      continue;
+    }
     // `start` is already in sys.modules (half-built); re-importing it returns at once, so never walk through it again.
     const prev = new Map([[start, null], [first.to, start]]);
     const queue = [first.to];
@@ -147,6 +147,7 @@ function reaches(start, target, out, set, beforeLine) {
   return null;
 }
 
+/** Return cyclic strongly connected components, including singleton self-imports. */
 function tarjan(nodes, edges) {
   const out = new Map(nodes.map((n) => [n, []]));
   for (const e of edges) out.get(e.from).push(e.to);
@@ -163,7 +164,7 @@ function tarjan(nodes, edges) {
     if (low.get(v) === idx.get(v)) {
       const scc = []; let w;
       do { w = stack.pop(); onStack.delete(w); scc.push(w); } while (w !== v);
-      if (scc.length > 1) sccs.push(scc.sort());
+      if (scc.length > 1 || out.get(v).includes(v)) sccs.push(scc.sort());
     }
   };
   for (const n of nodes) if (!idx.has(n)) strong(n);

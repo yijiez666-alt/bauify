@@ -46,6 +46,7 @@
         }
       }
     },
+    "fileModules": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Exact file-to-module ownership from graph construction, including explicit groups and root files." },
     "edges": {
       "type": "array",
       "items": {
@@ -56,7 +57,7 @@
           "from": { "type": "string" },
           "to": { "type": "string" },
           "weight": { "type": "integer", "minimum": 1 },
-          "kinds": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 1 } },
+          "kinds": { "type": "object", "minProperties": 1, "not": { "required": ["eager"], "maxProperties": 1 }, "properties": { "eager": { "type": "integer", "minimum": 0 } }, "additionalProperties": { "type": "integer", "minimum": 1 } },
           "evidence": {
             "type": "array",
             "minItems": 1,
@@ -68,8 +69,12 @@
               "properties": {
                 "file": { "type": "string" },
                 "line": { "type": "integer", "minimum": 1 },
+                "deferred": { "const": true },
                 "to": { "type": "string" },
-                "lazy": { "const": true }
+                "lazy": { "const": true },
+                "typeOnly": { "const": true },
+                "conditional": { "const": true },
+                "implicit": { "const": true }
               }
             }
           }

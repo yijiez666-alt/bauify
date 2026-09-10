@@ -14,7 +14,7 @@ Home: the standalone repository `yijiez666-alt/bauify`. Bauify produces facts, f
 - Six analysis dimensions: coupling, complexity, redundancy, error handling, change impact, and AI-generated-code smells.
 - Dimensions explicitly **not** done: cross-function data-flow / taint analysis, contract consistency, runtime / concurrency / resource safety, behaviour-level test robustness scores, and any single composite score. See §1.3 and the item-by-item rulings in Appendix A.
 - The JS/TS front end is the TypeScript Compiler API (`allowJs`) throughout: one traversal yields module edges, symbols, references, and calls.
-- A dependency cycle is a fact, not a verdict. The rules grade what a cycle can do at import time (nothing / order-dependent / proven failure) and leave the design judgment to the reader.
+- A dependency cycle is a fact, not a verdict. The rules distinguish dependency structure from unverified loading risk (not-proven / potential-at-import / potential-partial-init) and leave the design judgment to the reader.
 
 ---
 
@@ -142,7 +142,7 @@ A generated module map is far more detailed than a diagram a person would draw f
 **`overlay/inject.mjs` — analysis layered onto a delivered HTML.** An agent-authored Archify diagram says how a system *runs*; Bauify says what the code *imports*. `bauify overlay <delivered.html> <ir.json> <module-graph.json> --out <new.html>` appends one data block, one style block, and one script to a *copy* of the delivered HTML and adds a **Code analysis** toolbar button. The delivered file is never rewritten (`--out` may not equal the input), so `deliver`'s sha receipt still holds for the original.
 
 - Component-to-module mapping comes from the IR's `sources` by default; `--map` states it explicitly. Modules no component claims are listed as "not on this diagram" rather than dropped.
-- With the button on, the authored diagram and guided views recede and every component gets a blurred halo just outside its box, coloured by danger level: red (pulsing) = a load-time import failure proven from the facts; amber = a rule warns (an eager, import-order-dependent cycle, or a hub); blue = only informational facts (a cycle closed by lazy imports or one that exists only at package level); green = nothing fired; grey = no code maps here. A legend next to the button names the levels. No import lines are drawn on the diagram; Archify's picture stays the subject.
+- With the button on, the authored diagram and guided views recede and every component gets a blurred halo just outside its box, coloured by danger level: red (pulsing) = a supplied error finding (not currently emitted by cycle rules); amber = a rule warns (a module-scope cycle or a hub); blue = structural coupling with initialization behavior unverified; green = nothing fired; grey = no code maps here. A legend next to the button names the levels. No import lines are drawn on the diagram; Archify's picture stays the subject.
 - Clicking a component opens a panel with its indicators (circular dependency, hub module, instability), the mapped modules, every file with LOC and import counts, and module edges with file:line evidence. Clicking an indicator opens a second panel with the findings behind it and a small diagram Bauify draws to explain them: the cycle as a ring with lazy edges dashed, the hub as a star of dependents and dependencies with links to its source files, instability as in/out bars. Every file:line a finding cites is a button; with `--source <analyzed dir>` the cited files are embedded whole, and the button opens a third, draggable panel scrolled to the cited line. GitHub links are pinned to the analyzed commit.
 - The page embeds the full Bauify dataset (module graph plus every file's facts), and `findings.json` next to the module graph is picked up automatically; findings attach to components through `subject.component`, `subject.module(s)`, and `subject.files`, so future `redundancy/*` findings land in the same panels without changes to the page.
 - Root-level files are modules of their own (`main.py` → `main`, `config.py` → `config`); merging an entry point with a constants table into one `root` module manufactured a false cycle in an early run.
@@ -165,12 +165,12 @@ Input `findings.json` + `report.json`, output natural-language explanation and i
   "code": "coupling/import-cycle",
   "dimension": "coupling",
   "severity": "info",
-  "confidence": 1.0,
-  "message": "4 files form a dependency cycle closed only by function-scope (lazy) imports: llm/llm_client.py → tools/local_tool.py → tools/news/digest.py → llm/llm_client.py. No eager import cycle; nothing runs at import time. A coupling fact — often intentional when one side calls the other back at runtime — not a defect.",
+  "confidence": 0.7,
+  "message": "A dependency component contains deferred imports. Initialization behavior is not proven; function calls may occur during import. Any module-scope subcycles are reported separately.",
   "subject": { "files": ["llm/llm_client.py", "tools/local_tool.py", "tools/news/digest.py", "tools/search/pipeline.py"] },
   "evidence": {
-    "kind": "lazy-closed",
-    "risk": { "loading": "none-at-import", "coupling": "present", "loadingNote": "the cycle is only entered when the lazy-importing function is called" },
+    "kind": "deferred",
+    "risk": { "loading": "not-proven", "coupling": "present", "loadingNote": "call timing is not modeled; a deferred function may run during initialization" },
     "path": ["llm/llm_client.py", "tools/local_tool.py", "tools/news/digest.py"],
     "imports": [ { "file": "llm/llm_client.py", "line": 46, "to": "tools/local_tool.py", "names": ["*"] }, { "file": "tools/news/digest.py", "line": 78, "to": "llm/llm_client.py", "names": ["ask_llm"], "lazy": true } ],
     "lazyImports": 3,
@@ -195,7 +195,7 @@ Input `findings.json` + `report.json`, output natural-language explanation and i
 
 | code | severity | confidence | detects | graphs |
 |---|---|---|---|---|
-| `coupling/import-cycle` | info / warning / error | 1.0 | File-level strongly connected components from raw-facts, in tiers. **info**: the cycle is closed only by function-scope (lazy) imports — no eager cycle, nothing runs at import time; common in "the LLM calls a tool, the tool calls the LLM back" runtime collaboration. **warning**: every edge is a module-scope import — Python generally loads it, the later module finds the earlier one partially initialised in `sys.modules`, and behaviour depends on import order. **error**: the failure is provable from the facts — B does `from A import X` and A binds `X` on a line after the import that leads to B, so the named load order raises *cannot import name 'X' from partially initialized module*; the evidence gives the failing order, chain, and lines. A cycle is a fact, not a conclusion: `evidence.risk.loading` records none-at-import / order-dependent / proven-failure. Only `from m import name` is analysed for the proof; module-scope `m.attr` access is not, and TypeScript (no symbol bindings yet) never goes above warning. | raw facts (with symbols) |
+| `coupling/import-cycle` | info / warning | 0.7 | File-level runtime SCCs, excluding type-only edges. Deferred/conditional components are `not-proven`; module-scope cycles are `potential-at-import`. Recorded binding order may add an inspectable `partialInitCandidate` (`potential-partial-init`), not an execution proof. Current rules never emit error severity or claim import safety. | raw facts (with symbols) |
 | `coupling/cycle` | info | 1.0 | module (package) level strongly connected components; may be an artifact of directory grouping, and points at `import-cycle` for whether any file actually cycles | Module |
 | `coupling/layer-violation` | error | 1.0 | an edge against the layer order declared in configuration | Module |
 | `coupling/pattern-deviation` | warning | 0.5 | **when no layers are declared**: for every pair of directories compute the dominant dependency direction; an edge against it with weight < 20 % of the pair is a deviation; can be limited to edges added after `--since <ref>` | Module, Git |
